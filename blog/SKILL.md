@@ -29,8 +29,8 @@ $ARGUMENTS
 写任何东西之前，先确认事实而不是依赖记忆：
 
 1. `ls /Users/xt/workspace/blog/src/content/posts/ | tail -5` — 确认目录存在并看到最近的文章命名风格
-2. 读其中**一篇近期文章的 frontmatter**（前 15 行就够）— 确认 schema 没变
-3. 如果路径不存在或 schema 与下方记录不符，**停下来问用户**，不要猜测、不要在其他位置写文件
+2. **读 schema 文件** [src/content.config.ts](file:///Users/xt/workspace/blog/src/content.config.ts) — 这是 frontmatter 字段的**唯一可信源**。不要靠"读一篇样例文章"来推断 schema，因为样例没用到的可选字段会被你漏掉（这就是上一版 skill 漏掉 `image`、`updated`、`category` 等字段的原因）
+3. 如果路径不存在或 schema 与下方记录不符，**以 schema 为准**并提示用户 skill 文档需要更新，不要在其他位置写文件
 4. **收集已有 tag 池**——用类似下面的命令把所有已发布文章的 tag 聚合起来：
    ```bash
    awk '/^tags:/{f=1;next} f&&/^  - /{print substr($0,5);next} f{f=0}' \
@@ -71,30 +71,64 @@ $ARGUMENTS
 
 ### Frontmatter 规范
 
+> **唯一可信源是 [src/content.config.ts](file:///Users/xt/workspace/blog/src/content.config.ts) 的 zod schema**。下面是按当前 schema 整理的字段清单，schema 改了以它为准。
+
+**必填字段**（写出即可，不写会出问题）：
+
 ```yaml
 ---
 title: [中文标题]
 published: [当前北京日期，YYYY-MM-DD]
-description: [1-2 句话摘要]
+description: [1 句话摘要，≤120 字符]
 tags:
   - [tag1]
   - [tag2]
 ---
 ```
 
-**字段说明**：
-- 只有 4 个字段，不要画蛇添足加 `author`/`slug`/`featured`/`draft`/`pubDatetime` 等
+**常用可选字段**（按需启用）：
+
+| 字段 | 类型 | 用途 | 用法说明 |
+|---|---|---|---|
+| `image` | string | 封面图 | 路径相对于 post 文件，如 `../../assets/images/covers/foo.jpg`；也支持 `http(s)://` 和 `/` 开头的绝对路径 |
+| `updated` | date | 更新日期 | 文章后续修订时填，YYYY-MM-DD |
+| `category` | string | 分类 | 单个字符串，与 tags 区分 |
+| `pinned` | boolean | 置顶 | 默认 false |
+| `draft` | boolean | 草稿 | 默认 false，true 时不会发布 |
+| `author` | string | 作者 | 留空走站点默认 |
+| `lang` | string | 语言 | 如 `zh`、`en` |
+| `comment` | boolean | 评论开关 | 默认 true |
+
+**冷门字段**（一般不用，列在这只是知道有）：`sourceLink` / `licenseName` / `licenseUrl`（转载来源与协议）、`password` / `passwordHint`（加密文章）。
+
+**字段填写原则**：
+
+- **不要画蛇添足加 schema 里没有的字段**——zod 会拒绝
+- **不写不需要的可选字段**——能用默认值就用默认值，frontmatter 越短越易读
 - `published`：用北京时间日期，通过 `TZ='Asia/Shanghai' date +"%Y-%m-%d"` 获取（**不要用 UTC**）
+- `description`：**1 句话，≤120 字符**。文章列表卡片和 SEO 摘要用的，过长会被截断
 - `tags`：数量不设硬上限，按文章实际覆盖的维度来。中英文皆可，英文首字母大写（如 `CSS`、`Debug`），中文直接用（如 `小程序`）
-- **tag 命名规范**（冲突时遵循，不冲突就按预检查收集到的已有写法走）：
-  - `JS` → 统一用 `JavaScript`
-  - `TS` → 统一用 `TypeScript`
-  - `微信小程序` → 统一用 `小程序`
-  - 禁用过泛的 tag：`Frontend`、`Backend`、`Dev`
-  - 发现新的同义词冲突时，和用户确认后追加到本列表
-- 文件名 = slug，本身决定 URL，不需要单独的 slug 字段
-- `description`：**1 句话，≤120 字符**。这是文章列表卡片和 SEO 摘要用的，过长会被截断。不要把整个 abstract 塞进去
-- 如果预检查发现实际文章用了别的字段，以实际为准并提示用户
+- `image`：封面图先 `mkdir -p src/assets/images/covers/` 存到那里，命名用 post 的 slug。除非用户给了图，否则可以用 unsplash 等 CC0 来源（详见下方"封面图获取"）
+- 文件名 = slug，决定 URL，不需要单独的 slug 字段
+
+**tag 命名规范**（冲突时遵循，不冲突就按预检查收集到的已有写法走）：
+- `JS` → 统一用 `JavaScript`
+- `TS` → 统一用 `TypeScript`
+- `微信小程序` → 统一用 `小程序`
+- 禁用过泛的 tag：`Frontend`、`Backend`、`Dev`
+- 发现新的同义词冲突时，和用户确认后追加到本列表
+
+### 封面图获取（image 字段）
+
+如果用户没提供图，按以下顺序尝试：
+
+1. **检查 `src/assets/images/covers/`** 是否已有可复用的图
+2. **从 unsplash 拉一张 CC0**——unsplash 主页和 WebFetch 都会被 403 拦截，**正确流程**：
+   - `WebSearch "unsplash <主题关键词>"` 拿到 photo 页面 URL（slug 形如 `-6GvTDpkkPU`）
+   - `curl -sIL "https://unsplash.com/photos/<slug>/download?w=1600" | grep -i location` 拿到真实 CDN 地址
+   - `curl -sL -o src/assets/images/covers/<slug>.jpg "<cdn-url>"` 下载
+   - 注意避开 "Unsplash+" 标记的图（那是付费订阅）
+3. **告诉用户**用了哪张图、来源、可以替换
 
 ### 写作规范
 
