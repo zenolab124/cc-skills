@@ -1,7 +1,7 @@
 ---
 name: codewise
 description: 项目知识库生成与维护 — 扫描代码库，生成网状互链的模块化知识库（docs/knowledge/），帮助人和 AI 快速理解项目。支持全量生成（/codewise）、增量更新（/codewise update）和深度精读（/codewise deep）三种模式。Use when user says "codewise", "/codewise", "knowledge", "生成知识库", "更新知识库", "深度扫描", "document the project", "create knowledge base", or when onboarding to a new project and need structured documentation.
-argument-hint: "[update|deep] [scope description]"
+argument-hint: "[update|deep] [path] [scope description]"
 ---
 
 # 项目知识库
@@ -16,9 +16,23 @@ $ARGUMENTS
 
 ---
 
+## Phase 0：解析 scope
+
+扫描 `$ARGUMENTS`，提取第一个**实际存在的目录路径**作为 `<ROOT>`（子项目根）；其余文字作为 scope description 保留给后续阶段。若未提供路径，`<ROOT>` 默认为 `.`（整个仓库，行为与旧版一致）。
+
+**之后所有路径占位符都相对 `<ROOT>` 解析**：
+- 知识库输出位置：`<ROOT>/docs/knowledge/`
+- 注册指引写入：`<ROOT>/CLAUDE.md`
+- Phase 1 读文档、Phase 1.2 子代理扫描范围、Phase U 的 `git diff` pathspec，全部限定在 `<ROOT>` 内
+- 子项目外的文件不读、不扫、不链接。仓库根的 CLAUDE.md 可作为外层上下文参考，但不作为事实源，也不修改
+
+**确认 `<ROOT>`：** 开始 Phase 1 前，先向用户明确告知解析结果（例如"将为 `apps/web/` 生成知识库，输出到 `apps/web/docs/knowledge/`"），等待确认后再继续。
+
+---
+
 ## 模式判断
 
-检查 `docs/knowledge/INDEX.md` 是否存在：
+检查 `<ROOT>/docs/knowledge/INDEX.md` 是否存在：
 
 - **不存在** → 全量生成（Phase 1-6）
 - **不存在 + 参数含 `deep`** → 深度全量生成（Phase 1-6，Phase 3 使用深度模式）
@@ -32,10 +46,11 @@ $ARGUMENTS
 
 先读取项目中已有的文档（CLAUDE.md、README.md、package.json、Cargo.toml 等），快速了解技术栈和项目概况，再启动子代理扫描代码。
 
-**1.1 读取已有文档**（直接读，不用子代理）：
-- `CLAUDE.md`、`README.md`、`AGENTS.md` — 项目说明
-- `package.json`、`Cargo.toml`、`go.mod`、`Podfile`、`project.yml` 等 — 技术栈和依赖
-- 项目中的设计文档、架构文档 — 常见位置如 `docs/`、`doc/`、`design/`、`specs/`，也可能在根目录或其他位置
+**1.1 读取已有文档**（直接读，不用子代理，全部限定在 `<ROOT>` 内）：
+- `<ROOT>/CLAUDE.md`、`<ROOT>/README.md`、`<ROOT>/AGENTS.md` — 项目说明
+- `<ROOT>/package.json`、`<ROOT>/Cargo.toml`、`<ROOT>/go.mod`、`<ROOT>/Podfile`、`<ROOT>/project.yml` 等 — 技术栈和依赖
+- `<ROOT>` 下的设计文档、架构文档 — 常见位置如 `docs/`、`doc/`、`design/`、`specs/`
+- 仓库根（`<ROOT>` 之上）的 CLAUDE.md 可快速浏览作为外层上下文，但不作为事实源
 
 **已有文档的使用策略：读文档获取意图，读代码验证事实，冲突时以代码为准。**
 - 文档中的架构描述、模块划分 → 作为 Phase 2 规划条目的参考输入
@@ -43,7 +58,7 @@ $ARGUMENTS
 - 文档中的技术细节（用了什么、怎么配置）→ 必须用代码验证，项目文档经常过时
 - 如果文档和代码矛盾 → 条目以代码为准，可以在条目中标注"文档称 X，实际代码为 Y"
 
-**1.2 启动 1-3 个 Explore 子代理（并行）扫描源码：**
+**1.2 启动 1-3 个 Explore 子代理（并行）扫描源码（范围严格限定在 `<ROOT>` 内）：**
 
 每个子代理的任务模板：
 
@@ -56,6 +71,8 @@ $ARGUMENTS
 5. 第三方依赖及其用途
 6. 非显而易见的设计模式或架构决策
 7. UI/设计规范：扫描主题配置文件（uno.config、tailwind.config、theme.ts、CSS 变量文件等），识别主题色、暗色模式、视觉效果（玻璃质感、阴影等）、间距/圆角约束。这些归入 shared/ 分类
+
+**严格只扫描 `<ROOT>` 内的文件，`<ROOT>` 之外的目录一概不读、不引用。**
 
 **跳过第三方/vendor 代码，只分析项目自身的源码。** 包括但不限于：node_modules、vendor、Pods、uni_modules、.nuxt、.next、dist、build、generated 等目录，以及任何看起来是外部库或自动生成的代码。如果不确定某个目录是项目代码还是第三方代码，跳过它。
 
@@ -104,7 +121,7 @@ $ARGUMENTS
 ### 3.1 创建目录结构
 
 ```bash
-mkdir -p docs/knowledge/{domains,shared,decisions,integrations,workflows,pitfalls}
+mkdir -p <ROOT>/docs/knowledge/{domains,shared,decisions,integrations,workflows,pitfalls}
 ```
 
 只创建有条目的分类目录。
@@ -178,7 +195,7 @@ mkdir -p docs/knowledge/{domains,shared,decisions,integrations,workflows,pitfall
 
 ## Phase 4：索引
 
-生成 `docs/knowledge/INDEX.md`：
+生成 `<ROOT>/docs/knowledge/INDEX.md`：
 
 ```markdown
 # [项目名] 知识库
@@ -236,16 +253,16 @@ mkdir -p docs/knowledge/{domains,shared,decisions,integrations,workflows,pitfall
 
 ## Phase 6：注册到 CLAUDE.md
 
-在项目的 `CLAUDE.md` 中添加或更新知识库指引，确保 AI 每次会话都知道知识库的存在：
+在 `<ROOT>/CLAUDE.md` 中添加或更新知识库指引，确保 AI 每次会话都知道知识库的存在：
 
-**如果 CLAUDE.md 不存在**，创建并写入。**如果已存在**，在合适位置追加（不重复添加）。
+**如果 `<ROOT>/CLAUDE.md` 不存在**，创建并写入。**如果已存在**，在合适位置追加（不重复添加）。**仓库根 CLAUDE.md（若 `<ROOT>` 非根）不要改动。**
 
 追加内容：
 
 ```markdown
 ## 知识库
 
-项目知识库位于 `docs/knowledge/INDEX.md`，包含功能模块、公共组件、设计决策、踩坑记录等结构化文档。
+项目知识库位于 `docs/knowledge/INDEX.md`（相对本 CLAUDE.md 所在目录），包含功能模块、公共组件、设计决策、踩坑记录等结构化文档。
 需要理解项目时，先读 INDEX.md 按需跳转，不需要全部加载。
 ```
 
@@ -261,12 +278,12 @@ mkdir -p docs/knowledge/{domains,shared,decisions,integrations,workflows,pitfall
 
 按优先级尝试：
 1. 用户在参数中描述了变更范围 → 直接使用
-2. `git diff --name-only HEAD~5` 或 `git log --oneline -10` → 从最近提交推断
+2. `git diff --name-only HEAD~5 -- <ROOT>` 或 `git log --oneline -10 -- <ROOT>` → 从最近提交推断（限定在 `<ROOT>` 内）
 3. 询问用户
 
 ### U.2 评估影响
 
-读取 INDEX.md 和相关条目，判断：
+读取 `<ROOT>/docs/knowledge/INDEX.md` 和相关条目，判断：
 - 哪些现有条目需要更新？
 - 是否需要新增条目？
 - 是否有条目应该删除？
@@ -287,7 +304,7 @@ mkdir -p docs/knowledge/{domains,shared,decisions,integrations,workflows,pitfall
 - 只修改受影响的条目文件
 - 更新 INDEX.md（如有新增/删除）
 - 检查互链完整性（同 Phase 5）
-- 确认 CLAUDE.md 中的知识库指引仍然存在
+- 确认 `<ROOT>/CLAUDE.md` 中的知识库指引仍然存在
 
 ---
 
