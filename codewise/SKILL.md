@@ -53,8 +53,12 @@ git rev-list --count <baseline_commit>..HEAD -- <ROOT>
 - **存在 + 无参数** → **默认增量更新（Phase U）**
 - **存在 + 参数含 `update`** → 增量更新（Phase U，等价于无参数）
 - **存在 + 参数含 `rebuild`** → 强制重建（重新执行首次生成流程，会覆盖现有条目；**必须向用户明确告知并等待确认后再执行**）
+- **存在 + 参数含 `refresh-docs`** → **局部刷新 INDEX 的"项目文档导航"区**(Phase R,只跑 Step 4.6 + Phase 1.1 文档简介,不动其他条目,不更新 baseline_commit)
+- **存在 + 参数含 `refresh-interfaces`** → **局部刷新 INDEX 的"接口契约速查"区**(Phase R,只跑 Step 4.5,同上不动其他)
 
 **重建路径必须显式触发，默认走 update。** 这是为了保护用户手动编辑过的条目，避免误覆盖。
+
+**`refresh-*` 路径用于局部场景**(只改了文档/只加了 Tauri command,想立刻刷 INDEX 不想跑完整 update)。详见 Phase R。
 
 **没有"快速版"模式。** 我们的定位是"项目级记忆库",首次建立 baseline 就要完整——代码 + 会话历史一次消化干净。如果项目极大导致首次成本过高,接受这个成本,或缩小 `<ROOT>` 范围分子项目跑。
 
@@ -191,6 +195,43 @@ ls <ROOT>/uniCloud-*/database/*.schema.json <ROOT>/prisma/schema.prisma 2>/dev/n
 - ❌ **组件 props/events**(内部组件不是对外接口,除非项目是 SDK/UI 库)
 - ⚠️ **npm 包公开 API**(项目是库时算,是应用时不算)
 
+#### Step 4.6: 项目文档清单抽取 ⭐
+
+**目的**:让 AI 一进项目就知道作者写过哪些权威文档(README / CLAUDE.md / docs/*.md / 设计文档等)。这些**人写文档比知识库自动条目更权威**——作者亲手写,跟代码一起更新。codewise 不能让它们对 AI 隐形。
+
+主流程跑机械抽取,产出文档清单(只列路径,简介在 Phase 1.1 完整读后写):
+
+```bash
+# 根目录约定文档
+ls <ROOT>/{README,CLAUDE,AGENTS,CONTRIBUTING,CHANGELOG,SECURITY}.md 2>/dev/null
+
+# 项目文档目录
+find <ROOT>/{docs,doc,design,specs,architecture} -maxdepth 3 -name '*.md' 2>/dev/null \
+  | grep -v '/knowledge/' \
+  | grep -v '/node_modules/'
+```
+
+**排除规则**:
+- ❌ `<ROOT>/docs/knowledge/**`(自己生成,避免循环引用)
+- ❌ `<ROOT>/node_modules/**`(第三方)
+- ❌ `<ROOT>/dist/`、`<ROOT>/build/`(构建产物)
+- ❌ `<ROOT>/.git/`(版本控制元数据)
+
+**清单格式**(供 Phase 1.1 完整读用):
+
+```
+[
+  "README.md",
+  "CLAUDE.md",
+  "docs/CODEBASE_MAP.md",
+  "docs/server-setup.md",
+  "docs/recognition-api.md",
+  ...
+]
+```
+
+**LICENSE 等纯协议文档不抓**——对 AI 理解项目无价值。
+
 #### Step 5: 报告给用户
 
 跑完后向用户报告检测结果:
@@ -202,13 +243,15 @@ ls <ROOT>/uniCloud-*/database/*.schema.json <ROOT>/prisma/schema.prisma 2>/dev/n
 - 排除规则: [node_modules, target, ...]
 - 监测到的元文件: package.json (deps: vue, typescript, dcloudio), Cargo.toml, ...
 - 接口契约抽取: Tauri commands N 个 / 云函数 M 个 / REST endpoints P 个 / 契约文件 K 个
+- 项目文档清单: N 个(README/CLAUDE/docs/*),将在 Phase 1.1 完整读后写简介
 
-如有遗漏的代码树/扩展名/接口类型,现在告知;否则继续 Phase 1.1。
+如有遗漏的代码树/扩展名/接口类型/文档,现在告知;否则继续 Phase 1.1。
 ```
 
 **这些信息后面会写入**:
 - `multi_codetree` 字段(代码树覆盖)
 - INDEX.md "## 接口契约速查"区(接口清单)
+- INDEX.md "## 项目文档导航"区(文档清单 + 简介)
 
 ### 1.1 读取已有文档（直接读，不用子代理，全部限定在 `<ROOT>` 内）：
 - `<ROOT>/CLAUDE.md`、`<ROOT>/README.md`、`<ROOT>/AGENTS.md` — 项目说明
@@ -221,6 +264,22 @@ ls <ROOT>/uniCloud-*/database/*.schema.json <ROOT>/prisma/schema.prisma 2>/dev/n
 - 文档中的设计决策、选型原因 → 直接吸收到 `decisions/` 条目（这类信息代码里看不出来，文档是唯一来源）
 - 文档中的技术细节（用了什么、怎么配置）→ 必须用代码验证，项目文档经常过时
 - 如果文档和代码矛盾 → 条目以代码为准，可以在条目中标注"文档称 X，实际代码为 Y"
+
+**写"项目文档导航"简介(必做)** ⭐:
+
+对 Phase 1.0 Step 4.6 抽取的**每个文档完整读一遍**(用 Read 工具读全文,不要只看 H1+第一段),然后写一段 50-100 字的简介:
+
+- 第一句:**这个文档讲了什么**(主旨)
+- 第二句:**关键内容 / 适用场景**(让 AI 判断要不要打开)
+- 第三句(选填):**跟其他文档的关系**(比如 progress 文档是 plan 文档的进度跟进)
+
+✅ 完整读后:"服务器管理操作指南。包含 SSH 连接(`ssh snap-server`)、项目目录(`/app`)、变更日志记录方式。**操作服务器前必读**——CLAUDE.md 红线明示。"
+
+❌ 浅扫产物:"服务器配置文档"(只看 H1 写出来的废话)
+
+**为什么必须完整读**:简介的价值是让 AI **快速判断要不要打开这个文档**。只看 H1+第一段写出来的简介经常是文档自己重复(`# 服务器配置 → 这是关于服务器配置的文档`),没有信息增量。完整读后的简介才能告诉 AI 文档的真实内容轮廓。
+
+**这些简介会写进 INDEX.md 的"## 项目文档导航"区**(详见 Phase 4)。
 
 **主动识别架构图** ⭐:
 
@@ -420,6 +479,19 @@ mkdir -p <ROOT>/docs/knowledge/{domains,shared,decisions,integrations,workflows,
 
 三者**不重叠**:速查跳详情,详情跳代码,各司其职。**接口签名永远不在知识库里抄一份**——避免跟代码脱节。
 
+**项目文档导航 vs 自动生成条目的边界**:
+
+| 来源 | 内容 | 谁维护 |
+|---|---|---|
+| **项目文档**(README/CLAUDE/docs/*) | 作者人写,跟代码一起更新 | 项目作者 |
+| **knowledge/ 条目**(domains/shared/...) | LLM 基于代码合成 | codewise |
+
+**两者互补,不重叠**:
+- 项目文档导航 = "**项目作者写过哪些权威文档**"(只列+简介+链接)
+- knowledge/ 条目 = "**跨多文件的统一视角**"(LLM 合成的内容)
+
+简介可以提到"另见 domains/X 条目"做相互索引,但**不抄文档内容到 knowledge/ 条目**——文档自带链接即可。
+
 ### 3.6 主动识别 pitfalls
 
 pitfalls 在大项目下容易偏保守(信号类型不全)。下面**扩展扫描信号清单 + 加交叉验证机制**——确保会话里讨论过的真实 bug 不会从 pitfalls 里漏掉。
@@ -595,6 +667,33 @@ pitfalls 在大项目下容易偏保守(信号类型不全)。下面**扩展扫�
 
 **技术栈**：[从 Phase 1 探测结果中提取，如 "Vue 3 + TypeScript + uniCloud" 或 "Swift 6 + SwiftUI"]
 
+<!-- codewise-docs:start -->
+## 项目文档导航 ⭐
+
+本项目作者维护的人写文档(README / CLAUDE.md / docs/* / 设计文档),**这些是权威源**——比 knowledge/ 自动生成的更准。AI 一进项目要先知道它们存在。
+
+**简介在 Phase 1.1 完整读后写**(50-100 字),不是看 H1 拍脑袋。
+
+[只列项目实际存在的文档,按内容性质分组(入门 / 架构 / 运维 / 业务 / 实施记录 / 开发日志)。文档少时不必分组,直接列表。]
+
+### 入门 / 项目说明
+- [README.md](../../README.md) — [50-100 字简介,基于完整阅读]
+- [CLAUDE.md](../../CLAUDE.md) — [简介]
+
+### 架构 / 代码地图(如有)
+- [docs/CODEBASE_MAP.md](../CODEBASE_MAP.md) — [简介]
+
+### 运维 / 部署(如有)
+- [docs/server-setup.md](../server-setup.md) — [简介,标注"操作前必读"等关键提示]
+
+### 业务文档(如有)
+- [docs/<name>.md](../...) — [简介]
+
+### 实施记录 / 开发日志(如有)
+- [docs/<name>.md](../...) — [简介]
+<!-- codewise-docs:end -->
+
+<!-- codewise-interfaces:start -->
 ## 接口契约速查
 
 本项目所有"对外调用入口"快速索引,**让 AI 一进项目就掌握接口全局地图**(尤其云函数项目接口零散难找)。
@@ -644,6 +743,7 @@ pitfalls 在大项目下容易偏保守(信号类型不全)。下面**扩展扫�
 
 - `uniCloud-alipay/database/users.schema.json` — 用户表 schema 与权限规则
 - ...
+<!-- codewise-interfaces:end -->
 
 ---
 
@@ -843,6 +943,36 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
 - 是否需要新增条目？（出现新功能域、新依赖、新 workflow）
 - 是否有条目应该删除？（对应模块整体被移除）
 
+#### U.4.1 文档变更专项规则 ⭐
+
+变更文件清单里的 `.md` 文件单独识别处理(不走 U.5 子代理流程):
+
+```
+变更文件清单中提取所有 .md 路径,排除 docs/knowledge/** 内的:
+  · README.md / CLAUDE.md / AGENTS.md / CONTRIBUTING.md / CHANGELOG.md
+  · docs/**.md / doc/**.md / design/**.md / specs/**.md / architecture/**.md
+
+按 git diff 状态分类:
+  · A (Added)    → 主流程完整读新文档,在"项目文档导航"区加新条目
+  · M (Modified) → 主流程重读完整文档,更新对应简介
+  · D (Deleted)  → 主流程从"项目文档导航"区移除该文档条目
+  · R (Renamed)  → 移除旧条目 + 加新条目
+```
+
+**主流程直接处理,不派子代理**——文档量小(通常 ≤30 个),主 context 装得下。完整重读文档(不要只看 diff),写新简介 50-100 字(同 Phase 1.1 规则)。
+
+#### U.4.2 接口契约变更专项规则
+
+如果变更文件清单包含:
+- `<ROOT>/src-tauri/src/**.rs` 中含 `#[tauri::command]` 的文件
+- `<ROOT>/cloudfunctions/**` 或 `<ROOT>/uniCloud-*/cloudfunctions/**` 下任意改动
+- `<ROOT>/**/*.proto` / `<ROOT>/**/*.graphql` / `<ROOT>/**/openapi.yaml`
+- `<ROOT>/**/*.schema.json` 或 `<ROOT>/prisma/schema.prisma`
+
+→ **重新跑 Phase 1.0 Step 4.5 接口契约抽取**,刷新 INDEX 的"## 接口契约速查"区。
+
+主流程直接处理,机械替换 `<!-- codewise-interfaces:start --> ... <!-- codewise-interfaces:end -->` 之间内容。
+
 ### U.5 执行更新（子代理分发完整 diff）
 
 **核心原则：主流程不读完整 diff。** 按 U.1 的"变更文件分组"为每组启动一个 Explore 子代理，子代理读自己负责文件的完整 diff，主流程只汇总。这样每一行 diff 都被读到，且不会爆主 context。
@@ -896,6 +1026,56 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
 ```
 
 让用户清楚下次的起点在哪,而不是看着 INDEX.md 末尾的元信息自己猜。
+
+---
+
+## Phase R:局部刷新
+
+适用于"只想刷新 INDEX 某个机械抽取区域"的场景——成本极低,不需要跑完整 Phase U。
+
+### 触发方式
+
+- `/codewise refresh-docs` → 只刷新"## 项目文档导航"区
+- `/codewise refresh-interfaces` → 只刷新"## 接口契约速查"区
+
+### 适用场景
+
+- 你新加了一个 docs/X.md → `refresh-docs` 立即让 INDEX 包含
+- 你修改了 docs/server-setup.md → `refresh-docs` 让简介反映新内容
+- 你新加了一个 Tauri command → `refresh-interfaces` 立即让接口速查表包含
+- 你只想看导航区长什么样,不想跑完整 update
+
+**前置条件**:`<ROOT>/docs/knowledge/INDEX.md` 已存在(否则走首次生成,不是 refresh)。
+
+### Phase R 流程
+
+```
+R.1 模式识别
+    /codewise refresh-docs       → 走 docs 路径
+    /codewise refresh-interfaces → 走 interfaces 路径
+
+R.2 跑对应抽取
+    docs       → 跑 Phase 1.0 Step 4.6 + Phase 1.1 完整读 + 写简介
+    interfaces → 跑 Phase 1.0 Step 4.5 接口契约抽取
+
+R.3 机械替换 INDEX 对应区
+    用 sed 或 Read+Edit 找到 <!-- codewise-{docs,interfaces}:start --> 和
+    对应的 :end 标签,**只替换两个标签之间的内容**,不动 INDEX 其他区域
+
+R.4 报告
+    向用户报告:刷新了哪些条目(新增/修改/删除),不更新 baseline_commit
+```
+
+### 关键约束
+
+- ✅ **不更新 `baseline_commit` 和 `synced_at`** ——refresh 不是完整同步,跟 git baseline 解耦
+- ✅ **不动其他条目**——domains/shared/decisions 等一字不改
+- ✅ **不依赖 git baseline**——直接扫当前 working directory(允许未 commit 的改动)
+- ❌ **不替代 update**——refresh 只刷机械抽取区,代码变更对应的条目仍然要 update 才能更新
+
+### 一个边界提醒
+
+如果 `<ROOT>` 不是 git 仓库,update 会有问题但 refresh 仍然能跑——因为 refresh 不依赖 git baseline。这是 refresh 的额外优势。
 
 ---
 
