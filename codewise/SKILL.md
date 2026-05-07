@@ -810,20 +810,52 @@ pitfalls 在大项目下容易偏保守(信号类型不全)。下面**扩展扫�
 
 ## Phase 6：注册到 CLAUDE.md
 
-在 `<ROOT>/CLAUDE.md` 中添加或更新知识库指引，确保 AI 每次会话都知道知识库的存在：
+在 `<ROOT>/CLAUDE.md` 中写入硬约束起手式,**让 AI 不能"隐性跳过"读 INDEX**。
 
-**如果 `<ROOT>/CLAUDE.md` 不存在**，创建并写入。**如果已存在**，在合适位置追加（不重复添加）。**仓库根 CLAUDE.md（若 `<ROOT>` 非根）不要改动。**
+**软提示("需要理解项目时,先读 INDEX...")实测无效**——AI 经常自我蒙骗"我已经理解了不需要读"。改为**硬约束 + 后果警告**才有效。
 
-追加内容：
+### 写入策略(三种情形)
+
+#### 情形 1:`<ROOT>/CLAUDE.md` 不存在
+
+创建文件,写入下面"标准模板"。
+
+#### 情形 2:`<ROOT>/CLAUDE.md` 存在,但**没有 codewise 标签**
+
+检查 CLAUDE.md 里是否已经有用户手写的"知识库"段(标题含"知识库"/"knowledge")。
+
+- **没有相关段** → 在文件末尾追加"标准模板"
+- **有用户手写的相关段** → **停下问用户**:
+  > "检测到 CLAUDE.md 已有自定义知识库段。是否升级为 codewise 硬约束模板?
+  > Y → 替换为标准模板(用户手写内容会丢失,可先 git commit 备份)
+  > N → 保留你的版本不动(下次 update 也不动)"
+
+#### 情形 3:`<ROOT>/CLAUDE.md` 存在,**已有 codewise 标签**
+
+只替换 `<!-- codewise-claude-registry:start --> ... <!-- codewise-claude-registry:end -->` 之间的内容,**标签外用户写的任何内容都不动**。这是 update 时的标准路径。
+
+### 标准模板
 
 ```markdown
-## 知识库
+<!-- codewise-claude-registry:start -->
+## 📚 知识库
 
-项目知识库位于 `docs/knowledge/INDEX.md`（相对本 CLAUDE.md 所在目录），包含功能模块、公共组件、设计决策、踩坑记录等结构化文档。
-需要理解项目时，先读 INDEX.md 按需跳转，不需要全部加载。
+知识库由 **codewise** skill 生成,入口 [`docs/knowledge/INDEX.md`](docs/knowledge/INDEX.md)。
+
+**任务起手式(硬约束)**:每个新任务第一步 Read INDEX.md(本会话已读过则跳过)。**不读 = 默认从零摸索 = 重复踩前人已经记录过的坑**。
+
+维护:`/codewise update` 增量更新 | `/codewise rebuild` 强制重建 | `/codewise refresh-docs` 局部刷文档导航 | `/codewise refresh-interfaces` 局部刷接口速查。**禁止手编 `docs/knowledge/`**——它是 codewise 单源生成的领地。
+<!-- codewise-claude-registry:end -->
 ```
 
-**这一步是必须的。** 没有这个指引，AI 不会主动查阅知识库。
+### 关键设计
+
+- **HTML 标签界定**:跟 INDEX 的 `codewise-{docs,interfaces,meta}:start/end` 同套路,update 时机械替换,不污染用户在标签外的内容
+- **不要写温和措辞**(❌ "需要理解时先读 / 推荐先读") → 改为硬指令("第一步 Read")+ 后果警告("不读 = 重复踩坑")
+- **不抄 INDEX 内容到 CLAUDE.md**:触发词映射 / 反例 / 条目清单都在 INDEX 里,CLAUDE.md 只负责"让 AI 真去 Read INDEX"
+- **仓库根 CLAUDE.md(若 `<ROOT>` 非根)不动** — 只改 `<ROOT>/CLAUDE.md`
+
+**这一步是必须的。** 没有这个硬约束,AI 不会主动查阅知识库——历次实测 codewise 软提示版本 AI 跳过率 >50%。
 
 ---
 
