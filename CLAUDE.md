@@ -12,7 +12,9 @@ cc-skills/
 └── CLAUDE.md
 ```
 
-当前 skills：blog、codewise。
+当前 skills：blog、codewise、prd、recall、fix-thinking。
+
+特殊：fix-thinking 除手动触发外，还以 SessionStart hook 形式注册在 `~/.claude/settings.json`（指向 `~/.claude/skills/fix-thinking/check-thinking-patch.sh`），自动检测 VS Code 扩展更新清掉的思考块 patch。
 
 本仓库只管理自建 skill。第三方 skill（如 cartographer、ui-styling 等）直接放在 `~/.claude/skills/` 下，不纳入版本控制。
 
