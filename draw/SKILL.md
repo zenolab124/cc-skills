@@ -82,6 +82,32 @@ curl -L http://localhost:21731/api/generations/<generationId>/image -o <输出�
 - 如果用户在对话中逐步细化需求（"再亮一点"、"换个角度"），基于之前的 prompt 修改后重新生成
 - 失败时检查 errorMessage，给用户说人话，不要暴露原始错误
 
+## 参考图
+
+用户提供参考图时（"参考这张图"、"基于这个改"、"把这几张合在一起"），在 generate 请求中加 `referenceImages` 数组，后端自动路由到合适的上游端点。
+
+**两种来源**：
+
+- 引用本次会话中之前生成的图（有 generationId）：
+  `{ "kind": "generation", "generationId": "<id>" }`
+
+- 用户提供的本地文件（读取后 base64 编码）：
+  `{ "kind": "upload", "mimeType": "image/png", "dataBase64": "<base64>" }`
+
+上限 16 张。读取本地文件用 `base64 -i <path>` 获取编码内容，mimeType 根据扩展名判断。
+
+```json
+{
+  "prompt": { "type": "illustration", "style": "...", "subject": "把这几张图合成一张海报" },
+  "referenceImages": [
+    { "kind": "generation", "generationId": "<之前的id>" },
+    { "kind": "upload", "mimeType": "image/png", "dataBase64": "<base64>" }
+  ],
+  "size": "1024x1536",
+  "quality": "high"
+}
+```
+
 ## 直接构造 prompt（高级）
 
 如果对话中已经积累了足够的结构化信息，可以跳过 draft-prompt，直接构造 `ImagePrompt`：
