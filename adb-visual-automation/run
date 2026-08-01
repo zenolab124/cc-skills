@@ -1,0 +1,14 @@
+#!/bin/zsh
+
+set -eu
+
+readonly SKILL_DIR="${0:A:h}"
+readonly PYTHON="${ADB_VISUAL_AUTOMATION_PYTHON:-$SKILL_DIR/.venv/bin/python}"
+readonly HELPER="$SKILL_DIR/scripts/automation_helper.py"
+
+if [[ ! -x "$PYTHON" ]]; then
+  printf '{"status":"dependency_missing","message":"Global adb-visual-automation venv is unavailable: %s"}\n' "$PYTHON" >&2
+  exit 20
+fi
+
+exec "$PYTHON" "$HELPER" "$@"

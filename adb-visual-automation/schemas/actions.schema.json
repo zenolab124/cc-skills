@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.anthropic.dev/adb-visual-automation/actions.schema.json",
+  "title": "ADB Visual Automation Actions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "engine_version", "actions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "engine_version": {"const": "1.0.0"},
+    "actions": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/action"}
+    }
+  },
+  "$defs": {
+    "unitInterval": {"type": "number", "minimum": 0, "maximum": 1},
+    "roi": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/unitInterval"},
+        {"$ref": "#/$defs/unitInterval"},
+        {"$ref": "#/$defs/unitInterval"},
+        {"$ref": "#/$defs/unitInterval"}
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "tapOffset": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/unitInterval"},
+        {"$ref": "#/$defs/unitInterval"}
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "template": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "file", "sha256", "base_width", "base_height", "rotation", "compatible_version_codes"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "file": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "base_width": {"type": "integer", "minimum": 1},
+        "base_height": {"type": "integer", "minimum": 1},
+        "rotation": {"type": "integer"},
+        "compatible_version_codes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": ["string", "integer"]}
+        }
+      }
+    },
+    "visionFallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "target", "roi", "tap_offset", "min_area_ratio", "max_area_ratio", "min_evidence_count"],
+      "properties": {
+        "enabled": {"const": true},
+        "target": {"type": "string", "minLength": 1},
+        "roi": {"$ref": "#/$defs/roi"},
+        "tap_offset": {"$ref": "#/$defs/tapOffset"},
+        "min_area_ratio": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "max_area_ratio": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "min_evidence_count": {"type": "integer", "minimum": 2}
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package", "pre_page", "roi", "threshold", "min_margin", "tap_offset", "scale_tolerance", "scale_step", "templates"],
+      "properties": {
+        "required": {"type": "boolean"},
+        "package": {"type": "string", "minLength": 1},
+        "pre_page": {"type": "string", "minLength": 1},
+        "post_page": {"type": "string", "minLength": 1},
+        "post_pages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "roi": {"$ref": "#/$defs/roi"},
+        "threshold": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "min_margin": {"$ref": "#/$defs/unitInterval"},
+        "tap_offset": {"$ref": "#/$defs/tapOffset"},
+        "scale_tolerance": {"type": "number", "minimum": 0, "maximum": 1},
+        "scale_step": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "templates": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/template"}
+        },
+        "vision_fallback": {"$ref": "#/$defs/visionFallback"}
+      },
+      "oneOf": [
+        {"required": ["post_page"], "not": {"required": ["post_pages"]}},
+        {"required": ["post_pages"], "not": {"required": ["post_page"]}}
+      ]
+    }
+  }
+}
