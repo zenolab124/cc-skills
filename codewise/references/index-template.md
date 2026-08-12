@@ -1,6 +1,6 @@
 # INDEX.md 模板
 
-Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KB>/_sync.json`，不写进 INDEX.md**——见 [storage-layout.md](storage-layout.md)。
+Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KBR>/_sync.json`，不写进 INDEX.md**——见 [storage-layout.md](storage-layout.md)。
 空分类不出现在 INDEX.md 中。
 
 ## 引用写法（两类，规则不同）
@@ -36,9 +36,9 @@ Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KB>/_sync.
 [只列项目实际存在的文档,按内容性质分组(入门 / 架构 / 运维 / 业务 / 实施记录 / 开发日志)。文档少时不必分组,直接列表。]
 
 ### 入门 / 项目说明
-- [README.md](../../README.md) — [50-100 字简介,基于完整阅读]
-- [AGENTS.md](../../AGENTS.md) — [简介]
-- [CLAUDE.md](../../CLAUDE.md) — [简介]
+- **`README.md`** — [50-100 字简介,基于完整阅读]
+- **`AGENTS.md`** — [简介]
+- **`CLAUDE.md`** — [简介]
 
 ### 架构 / 代码地图(如有)
 - [docs/CODEBASE_MAP.md](../CODEBASE_MAP.md) — [简介]

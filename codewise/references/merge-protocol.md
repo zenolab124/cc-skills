@@ -73,8 +73,10 @@ pitfalls/tauri-ipc-timing.md            ← 主线
 
 ## 触发方式
 
-**默认被动**：分支合并回主线后，在归属分支上正常跑 `codewise update` 即可。`synced_at` 边界加合并状态判定链能处理混合场景，零心智负担。
+**只有显式触发一条路**：`codewise merge <branch>`。
 
-**显式模式**：`codewise merge <branch>` 精确指定要并入的分支目录，报告里单列"从该分支并入 N 条"。适合想立刻确认某批知识已进来的时候。
+**普通 `codewise update` 不会自动并入分支知识库** —— Phase U 的流程里没有扫描 `.branches/` 的步骤，分支目录会一直留在那里直到你显式合并。不要指望"跑一次 update 就自动收进来"。
 
-两种方式走的是同一套合并逻辑，区别只在范围界定与报告粒度。
+代价是要记得做；换来的是合并时机完全可控——三方合并会改写主线条目，不该在用户没预期时发生。
+
+**提示机制**：`update` 时若发现 `.branches/<slug>/` 对应的分支在主仓库已合并（`git merge-base --is-ancestor <branch> HEAD` 成立），在报告末尾提示一行「分支 X 已合并，其知识库尚未并入，可运行 `codewise merge X`」——只提示，不自动执行。

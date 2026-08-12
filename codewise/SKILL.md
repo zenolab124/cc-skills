@@ -40,13 +40,13 @@ description: 项目级记忆库生成与维护 — 扫描代码库、全部 Git 
 
 **会话来源与 Worktree 项目身份：** 不要从当前 cwd 手拼 Claude Code 目录。完整读取 [references/session-sources.md](references/session-sources.md)，并始终用 `scripts/discover_sessions.py` 生成统一会话清单。项目身份以 Git `git-common-dir` 为锚点；同一项目的主工作树、Codex 临时工作树与其他 `git worktree` 都要覆盖。目录/hash 命中只是候选，子项目必须再用文件操作、tool cwd、diff 等内容证据过滤。
 
-**已删除 Worktree 的会话打捞（必做）：** 若 INDEX 元信息区有 `known_worktrees`，把每一项通过 `--known-worktree` 回传给发现脚本。这些路径已不在 `git worktree list` 中，但会话文件仍在磁盘上——不回传就永久发现不了。每次运行结束都要把脚本输出的 `project.known_worktrees` 原样写回元信息区（见 Phase 4 / U.6）。标记 `stale=true` 的 Worktree 只用于会话路径匹配，没有 HEAD/branch，因此其会话一律按 `unknown-branch` 保守处理。
+**已删除 Worktree 的会话打捞（必做）：** 若 `<KBR>/_sync.json` 有 `known_worktrees`，把每一项通过 `--known-worktree` 回传给发现脚本。这些路径已不在 `git worktree list` 中，但会话文件仍在磁盘上——不回传就永久发现不了。每次运行结束都要把脚本输出的 `project.known_worktrees` 原样写回 `_sync.json`（见 Phase 4 / U.6）。标记 `stale=true` 的 Worktree 只用于会话路径匹配，没有 HEAD/branch，因此其会话一律按 `unknown-branch` 保守处理。
 
 **报告 scope 与归属：** 开始 Phase 1 前向用户告知解析结果——`<ROOT>`、`<KBR>` 的位置、本次归属的分支目录（例如"将为 `apps/web/` 生成知识库，写入 `<KB>/apps-web/main/`，归属主线"）。**报告后直接继续，不阻塞。**
 
 **唯一需要停下来问的情况**：首次在某个非主线分支上运行，且该分支还没有自己的知识库目录——此时按 [references/branch-resolution.md](references/branch-resolution.md) 展示推导出的归属，问一次是否建独立目录。这个选择记入分支登记表，同一分支只问一次。
 
-**过期检测（仅当 `<KBR>/INDEX.md` 已存在 + 主仓库是 git 仓库时执行）：** 读 `<KB>/_sync.json` 拿 `baseline_commit`：
+**过期检测（仅当 `<KBR>/INDEX.md` 已存在 + 主仓库是 git 仓库时执行）：** 读 `<KBR>/_sync.json` 拿 `baseline_commit`：
 
 ```bash
 # 先判方向：baseline 是不是当前 HEAD 的祖先
@@ -73,7 +73,9 @@ fi
 
 ## 模式判断
 
-**先做旧格式守卫。** 判据是 `<ROOT>/docs/knowledge/` **是不是独立 git 仓库**：
+**先解析 `<KB>` 的真实位置。** 在 git worktree 中 `<ROOT>/docs/knowledge` 不存在（它被 gitignore，不会 checkout）——此时必须按 [references/storage-layout.md](references/storage-layout.md) 的规则定位到**主工作树**下的对应路径（**含 scope 相对段**）。把"worktree 里没有"当成"首次生成"会在每个 worktree 里重复全量生成。
+
+**再做旧格式守卫。** 判据是 `<KB>` **是不是独立 git 仓库**：
 
 ```bash
 # 注意：不能用 rev-parse --git-dir —— 它在主仓库追踪的普通子目录里同样成功
@@ -397,13 +399,13 @@ Worktree 绝对路径先映射成“Worktree 根 + 相对路径”，再映射�
 
 ## Phase 4：索引
 
-生成 `<KBR>/INDEX.md`（纯内容），**同步状态另写 `<KB>/_sync.json`**（`codewise_version`、`baseline_commit`、`synced_at`、`scope_root`、`multi_codetree`、`session_sources`、`worktree_count`、`known_worktrees`）。字段定义与跨机器冲突解决规则见 [references/storage-layout.md](references/storage-layout.md)。若不是 git 仓库，`baseline_commit` 写 `null`。
+生成 `<KBR>/INDEX.md`（纯内容），**同步状态另写 `<KBR>/_sync.json`**（`codewise_version`、`baseline_commit`、`synced_at`、`scope_root`、`multi_codetree`、`session_sources`、`worktree_count`、`known_worktrees`）。字段定义与跨机器冲突解决规则见 [references/storage-layout.md](references/storage-layout.md)。若不是 git 仓库，`baseline_commit` 写 `null`。
 
 **为什么分离**：这些字段每次运行必变，留在 INDEX.md 里会让两台机器各跑一次后的 merge **必然**冲突。分支归属由目录结构保证，因此不需要漂移检测字段。
 
 `synced_at` **必须用完整 ISO 8601 时间戳**（精确到秒，含时区），不要只写日期——Phase U 的会话边界判断依赖这个精度。
 
-INDEX.md 的完整模板（各分区结构 + 末尾同步元信息区的全部字段定义）见 [references/index-template.md](references/index-template.md)，生成前完整读取。
+INDEX.md 的完整模板见 [references/index-template.md](references/index-template.md)，生成前完整读取。
 
 `_sync.json` 是增量更新的依据（算 git 差量、判定会话提取边界、回传 `known_worktrees`）。缺失或被改坏会导致下次 update 退化成全量重扫。
 
@@ -461,7 +463,7 @@ INDEX.md 的完整模板（各分区结构 + 末尾同步元信息区的全部�
 
 当知识库已存在，按以下顺序执行。
 
-**前置**：Phase 0 已读取 INDEX.md 元信息区，拿到 `baseline_commit`。git 仓库 + baseline 存在 → 走 git 差量主路径；否则退化兜底（询问用户 / mtime / 仅会话回顾）。
+**前置**：Phase 0 已读取 `<KBR>/_sync.json`，拿到 `baseline_commit`。git 仓库 + baseline 存在 → 走 git 差量主路径；否则退化兜底（询问用户 / mtime / 仅会话回顾）。
 
 ### U.1 git 时间线采集（主流程，轻量）
 
@@ -526,7 +528,11 @@ git -C <worktree-root> status --short -- <mapped-scope>
 
 ### U.2 当前会话回顾（必做）
 
-**完整阅读本次会话的全部消息**——从第一条到触发 update 的这一刻,**不应用 timestamp 过滤**。语义连续性优先于"避免重读":人类的记忆会压缩细节,模型的注意力会偏向近期消息,调试早期的关键线索(最初的报错、被排除的假设、中途的误判)往往就在这时被丢掉,而这些恰恰是 pitfalls 的核心原料。
+**完整阅读本次会话的全部消息**——从第一条到触发 update 的这一刻,**不应用 timestamp 过滤**。
+
+⚠️ **若本次会话发生过上下文压缩，运行时上下文里已经没有早期原文了。** 此时必须读当前会话的**落盘副本**补齐前半段——被压缩掉的恰恰是最早的调试线索（最初的报错、被排除的假设、中途的误判），而那正是 pitfalls 的核心原料。判断依据：上下文中出现过摘要标记，或最早的消息明显不是会话真正的开头。
+
+语义连续性优先于"避免重读":人类的记忆会压缩细节,模型的注意力会偏向近期消息,调试早期的关键线索(最初的报错、被排除的假设、中途的误判)往往就在这时被丢掉,而这些恰恰是 pitfalls 的核心原料。
 
 **baseline 是"提取边界",不是"读什么的过滤线":**
 - 完整通读会话(获得完整语义上下文,理解后文对前文的引用)
@@ -565,12 +571,15 @@ git -C <worktree-root> status --short -- <mapped-scope>
    ```bash
    python3 <SKILL_DIR>/scripts/discover_sessions.py <ROOT> \
      --since '<synced_at>' --baseline '<baseline_commit>' \
-     --known-worktree '<INDEX.known_worktrees 的每一项>' --pretty
+     --known-worktree '<_sync.json 的 known_worktrees 每一项>' --pretty
    ```
 
    条目多时改用 `--known-worktrees-file <临时清单>`（一行一个）。**漏传等于丢掉那些 Worktree 的全部会话。**
 
-3. 按 `provider + session_id` 排除当前会话的落盘副本；其余每个候选会话启动一个子代理。
+3. 当前会话的落盘副本按以下规则处理，**不要无条件排除**：
+   - 未发生上下文压缩 → 按 `provider + session_id` 排除（U.2 已完整读过，避免重复）
+   - **发生过压缩** → **必须纳入**，用它补齐运行时上下文已丢失的早期部分；提取时只取压缩边界之前的内容，避免与 U.2 重复
+   其余每个候选会话启动一个子代理。
 4. 子代理从头到尾阅读会话以保留语义连续性，但只为消息时间 `timestamp > synced_at` 的讨论产出新信号；无可靠消息时间的来源用文件 mtime 作为保守边界并标注。
 5. 先做 scope 内容过滤，再输出统一归一化摘要；同时标明对应 Worktree 及改动状态。
 6. **`multi_branch=true` 的会话必须分段**：按 `branches` 与每条消息（Codex 按每个 resume 标记点）把信号拆到各自所属分支，逐段定性。整条会话用一个分支值定性会把大部分信号贴错标签。
@@ -686,7 +695,7 @@ git -C <worktree-root> status --short -- <mapped-scope>
 2. 更新 INDEX.md(新增/删除条目)
 3. 检查互链完整性(同 Phase 5)
 4. 确认 `<ROOT>/AGENTS.md` 与 `<ROOT>/CLAUDE.md` 中的知识库指引仍然存在
-5. **最后**才更新 `<KB>/_sync.json`：`baseline_commit` 改为当前 `git rev-parse HEAD`，`synced_at` 改为当前完整 ISO 8601 时间戳，并刷新 `session_sources`、`worktree_count` 与 `known_worktrees`（后者原样写入发现脚本输出的 `project.known_worktrees`，只增不减）
+5. **最后**才更新 `<KBR>/_sync.json`：`baseline_commit` 改为当前 `git rev-parse HEAD`，`synced_at` 改为当前完整 ISO 8601 时间戳，并刷新 `session_sources`、`worktree_count` 与 `known_worktrees`（后者原样写入发现脚本输出的 `project.known_worktrees`，只增不减）
 6. 提交知识库仓库并推送本地镜像（见 [references/storage-layout.md](references/storage-layout.md)）；GitHub 推送失败只报告，不阻塞
 
 **为什么要这个顺序?** 如果中途崩了,baseline 没更新,下次 update 仍然从旧 baseline 算 diff——会重复处理这次没改完的部分,但不会丢东西。**重跑是安全的**。

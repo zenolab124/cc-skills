@@ -22,8 +22,8 @@ python3 <SKILL_DIR>/scripts/discover_sessions.py <ROOT> --pretty
 
 ```bash
 python3 <SKILL_DIR>/scripts/discover_sessions.py <ROOT> \
-  --since '<INDEX.synced_at>' --baseline '<INDEX.baseline_commit>' \
-  --known-worktree '<INDEX.known_worktrees 的每一项>' --pretty
+  --since '<_sync.json 的 synced_at>' --baseline '<_sync.json 的 baseline_commit>' \
+  --known-worktree '<_sync.json 的 known_worktrees 每一项>' --pretty
 ```
 
 条目较多时改用文件形式，一行一个路径（`#` 开头为注释）：

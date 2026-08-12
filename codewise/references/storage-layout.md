@@ -39,8 +39,13 @@
 
 ```bash
 MAIN=$(git worktree list --porcelain | head -1 | cut -d' ' -f2)
-# 知识库在 $MAIN/docs/knowledge/
+SCOPE_REL=$(git rev-parse --show-prefix)          # <ROOT> 相对当前 worktree 根，末尾带 /
+KB="$MAIN/${SCOPE_REL}docs/knowledge"             # 子项目必须带上这段，否则会定位到仓库根
 ```
+
+⚠️ **漏掉 `SCOPE_REL` 会让子项目定位到主工作树根目录的知识库**——那是另一个 scope 的库，或者根本不存在。
+
+⚠️ **worktree 里 `<ROOT>/docs/knowledge` 不存在，不等于"首次生成"。** 模式判断必须先按上面的规则定位到主工作树的知识库；只有主工作树那份也不存在时，才是真的首次生成。否则会在每个 worktree 里重新全量生成一遍。
 
 这是唯一需要跑命令的场景。worktree 里默认**只读不写**（短期实验分支不写知识库，见 branch-resolution.md）。
 
@@ -52,13 +57,14 @@ MAIN=$(git worktree list --porcelain | head -1 | cut -d' ' -f2)
 ├── .gitignore                 # 必须含 .lock —— 见下方"跨机器同步"
 ├── _identity.json             # 项目身份锚点（静态）
 ├── _meta.json                 # anchor_kind + 主线分支实际名（静态，极少变）
-├── _sync.json                 # 上次同步状态（每次运行必变，与内容分离）
+├── _sync.json                 # 主线的同步状态（每次运行必变，与内容分离）
 ├── .lock                      # 并发锁（不提交）
 ├── INDEX.md                   # 主线索引 ← 最常访问的路径
 ├── domains/ shared/ decisions/ integrations/ workflows/ pitfalls/
 ├── .branches/
 │   └── <branch-slug>/         # 长功能分支的稀疏知识库
 │       ├── _meta.json         # 原始分支名 + forked_from
+│       ├── _sync.json         # 该分支自己的同步状态 —— 不与主线共用
 │       ├── _deleted           # 本分支删除的条目路径清单，一行一个
 │       └── ...                # 只放本分支新增或修改过的条目
 └── .archive/                  # 已合并或已废弃的分支目录
@@ -74,10 +80,18 @@ MAIN=$(git worktree list --porcelain | head -1 | cut -d' ' -f2)
 
 ## 主仓库侧的两项前置
 
-**① `.gitignore` 必须包含它。** 首次生成时检查 `<ROOT>` 或仓库根的 `.gitignore`，缺失就追加（相对仓库根的路径）：
+**① `.gitignore` 必须包含它，且路径要带上 scope。** gitignore 的 `/` 开头模式是**相对该 .gitignore 文件所在目录**的，所以在仓库根写 `/docs/knowledge/` **匹配不到** `apps/web/docs/knowledge/`：
 
-```
-/docs/knowledge/
+| `<ROOT>` | 写在哪 | 写什么 |
+|---|---|---|
+| 仓库根 | 仓库根 `.gitignore` | `/docs/knowledge/` |
+| `apps/web` | 仓库根 `.gitignore` | `/apps/web/docs/knowledge/` |
+| `apps/web` | `apps/web/.gitignore` | `/docs/knowledge/` |
+
+推荐第二行——单一 `.gitignore` 便于维护，也不必为子项目新建文件。**写完必须验证**：
+
+```bash
+git check-ignore -q <ROOT>/docs/knowledge && echo OK || echo "规则没生效"
 ```
 
 漏了这条，知识库会被主仓库追踪——那就退回了旧方案的全部问题：分支冲突、工作树每次变脏、合并时 INDEX 元信息必冲突，以及**主仓库公开时知识库里的调试过程和内部判断一并公开**。
@@ -104,7 +118,7 @@ git 对嵌套仓库有内置保护：`git clean -xfd` 会打印「跳过仓库 d
 
 ## 同步状态与元信息
 
-`baseline_commit`、`synced_at` 这些**每次运行必变**的字段放在 `<KB>/_sync.json`，**不放 INDEX.md**：
+`baseline_commit`、`synced_at` 这些**每次运行必变**的字段放在 **`<KBR>/_sync.json`**，**不放 INDEX.md**：
 
 ```json
 {
@@ -122,6 +136,8 @@ git 对嵌套仓库有内置保护：`git clean -xfd` 会打印「跳过仓库 d
 **为什么必须分离**：这两个字段每次运行都变，放在 INDEX.md 里意味着两台机器各跑一次后，merge 时**必然**在这两行冲突——不是概率问题，是每次都会。分离后 INDEX.md 的合并退化成纯内容合并，多数情况 git 能自动处理；顺带 INDEX.md 也不再每次运行都产生 diff。
 
 `_meta.json`（`anchor_kind` + 主线分支名）是**静态**信息，极少变，所以不与 `_sync.json` 合并——否则又把静态内容拖进高频变更文件。
+
+⚠️ **`_sync.json` 跟 `<KBR>` 走，不是 `<KB>`。** 主线一份、每个分支目录各一份。放在 `<KB>` 根会让所有分支共用同一个 `baseline_commit`——功能分支写入自己的 HEAD 后，切回主线就会命中"主仓库落后于知识库"检测并建议 `git pull`，**而那个 commit 在另一条分支上，pull 根本没用**。
 
 ### 冲突解决规则
 
@@ -162,7 +178,16 @@ git 对嵌套仓库有内置保护：`git clean -xfd` 会打印「跳过仓库 d
 
 - 已配置 `origin` 时每次 commit 后尝试 push，**失败绝不阻塞流程**，只在报告里留一行「远端未同步，本地镜像已保存，N 个 commit 待推送」
 
-**跨机器同步需要两条腿**：知识库走 git remote，**会话目录走文件同步**（syncthing / rsync `~/.claude/projects/`）。只做前者的话，另一台机器的会话仍然扫不到，那边的知识库会缺掉最有价值的部分。做之前先想清楚是否两条都要。
+**跨机器同步需要两条腿**：知识库走 git remote，**会话目录走文件同步**。要同步的是**全部已用来源**的目录，不只 Claude：
+
+```
+~/.claude/projects/                    # Claude Code
+~/.codex/sessions/                     # Codex CLI / Desktop
+~/.codex/archived_sessions/            # Codex 归档
+~/.gemini/tmp/                         # Gemini CLI（如在用）
+```
+
+漏掉 Codex 那两个目录是个实际风险——实测某些项目的 Codex 会话数比 Claude 还多。只做前者的话，另一台机器的会话仍然扫不到，那边的知识库会缺掉最有价值的部分。做之前先想清楚是否两条都要。
 
 跨机器还有三处必须注意：
 
