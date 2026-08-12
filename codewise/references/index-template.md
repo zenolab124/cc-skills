@@ -1,6 +1,6 @@
 # INDEX.md 模板
 
-Phase 4 生成 `<KBR>/INDEX.md` 的完整模板，含各分区结构与末尾的同步元信息区。
+Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KB>/_sync.json`，不写进 INDEX.md**——见 [storage-layout.md](storage-layout.md)。
 空分类不出现在 INDEX.md 中。
 
 ## 引用写法（两类，规则不同）
@@ -147,19 +147,6 @@ Phase 4 生成 `<KBR>/INDEX.md` 的完整模板，含各分区结构与末尾的
 
 ---
 
-<!-- codewise-meta:start -->
-## 同步元信息
-
-- **codewise_version**: `3`
-- **baseline_commit**: `<git rev-parse HEAD 写入；非 git 仓库写 null>`
-- **anchor_kind**: `<main | branch:<原始分支名>；标明本目录是主线还是某分支的稀疏知识库>`
-- **synced_at**: `<完整 ISO 8601 时间戳，如 2026-04-30T14:23:01+08:00>`
-- **scope_root**: `<ROOT 相对仓库根的路径，根则为 .>`
-- **multi_codetree**: `<Phase 1.0 检测出的有效代码树清单,如 "src/, src-tauri/, uniCloud-alipay/";单代码树写 "src/" 即可>`
-- **session_sources**: `<最近一次扫描实际发现的来源与数量，如 "codex:12, claude:8, gemini:2"；未解析来源写 "cursor:detected-unparsed">`
-- **worktree_count**: `<最近一次扫描覆盖的同项目 Worktree 数量>`
-- **known_worktrees**: `<发现脚本输出的 project.known_worktrees 原样写入，逗号分隔；均为相对仓库根的路径>`
-
-> 此区域由 codewise 自动维护，**请勿手动编辑**。增量更新基于 `baseline_commit` 计算 git 差量、基于 `synced_at` 判定会话提取边界；`anchor_kind` 标明本目录的归属，`multi_codetree`、`session_sources` 与 `worktree_count` 用于披露最近一次覆盖范围。`known_worktrees` 是**必须持久化**的累积集合：Worktree 一旦被 `git worktree remove`/`prune` 移出注册表，其下所有会话就再也无法通过路径发现，而短期实验 Worktree 用完即弃——丢失是静默且不可补救的。这里只写相对路径，不存储本机绝对路径。
-<!-- codewise-meta:end -->
+> 同步状态（baseline / synced_at / known_worktrees 等）不在本文件，见 `_sync.json`。
+> 那些字段每次运行都变，放在 INDEX 里会让两台机器的 merge 必然冲突。
 ```

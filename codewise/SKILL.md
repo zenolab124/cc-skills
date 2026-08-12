@@ -28,6 +28,7 @@ description: 项目级记忆库生成与维护 — 扫描代码库、全部 Git 
 | 主仓库不是 git 仓库 | **询问一次** | 说明 `git init` 能拿回什么（Worktree 打捞、分支目录、三方合并、baseline 差量、身份锚点），以及首次做成本最低。拒绝则记入 `_meta.json` 的 `degraded_acknowledged`，之后不再问 |
 | 是 git 但零 commit | **询问一次** | 没有首个 commit 就建不了身份锚点，也没有 baseline。提示先做一次 commit |
 | `.gitignore` 未含 `/docs/knowledge/` | 自动补 | 缺这条知识库会被主仓库追踪，退回旧方案的全部问题 |
+| `<KB>/.gitignore` 未含 `.lock` | 自动补 | 锁一旦被提交推到另一台，那边会误判为「他人持锁」，两小时内拒绝运行 |
 
 主仓库**没有 remote 完全不影响** codewise —— 身份锚点用首个 commit hash，不用 remote URL。
 
@@ -45,16 +46,24 @@ description: 项目级记忆库生成与维护 — 扫描代码库、全部 Git 
 
 **唯一需要停下来问的情况**：首次在某个非主线分支上运行，且该分支还没有自己的知识库目录——此时按 [references/branch-resolution.md](references/branch-resolution.md) 展示推导出的归属，问一次是否建独立目录。这个选择记入分支登记表，同一分支只问一次。
 
-**过期检测（仅当 `<KBR>/INDEX.md` 已存在 + 主仓库是 git 仓库时执行）：** 读元信息区，提取 `baseline_commit`，报告距上次同步的累计 commit 数：
+**过期检测（仅当 `<KBR>/INDEX.md` 已存在 + 主仓库是 git 仓库时执行）：** 读 `<KB>/_sync.json` 拿 `baseline_commit`：
 
 ```bash
-comparison_base=$(git merge-base <baseline_commit> HEAD || true)
-if [ -n "$comparison_base" ]; then
+# 先判方向：baseline 是不是当前 HEAD 的祖先
+if git merge-base --is-ancestor <baseline_commit> HEAD; then
+  git rev-list --count <baseline_commit>..HEAD -- <ROOT>        # 正常：报告累计 commit 数
+elif comparison_base=$(git merge-base <baseline_commit> HEAD); then
+  echo "baseline 不在当前 HEAD 的历史中"                          # rebase/分叉，或主仓库落后
   git rev-list --count "$comparison_base"..HEAD -- <ROOT>
 else
   echo "baseline 与当前 HEAD 没有共同祖先；无法计算可靠的 commit 数。"
 fi
 ```
+
+⚠️ **`--is-ancestor` 失败时必须分辨两种情况**，否则会静默什么都不做：
+
+- **主仓库落后于知识库**（`baseline` 反而包含 HEAD，即 `git merge-base --is-ancestor HEAD <baseline>` 成立）→ 典型场景是跨机器时拉了知识库但没拉主仓库。此时差量范围为空，**停下提示先 `git pull` 主仓库**，不要当成"没有变化"
+- **发生过 rebase / 分叉** → 用 `merge-base` 作比较起点，正常继续并告知
 
 把累计 commit 数和 `synced_at` 一并告知用户（例如"距上次同步 2026-04-15 累计 23 个 commits"）；若 `comparison_base` 与 `baseline_commit` 不同，说明发生过 rebase/分叉，用共同祖先计数并告知。**这只是信息披露，不阻塞流程。** 若 `baseline_commit` 不存在、commit 已被 rebase 冲掉、或非 git 仓库，提示原因并继续——后续 Phase U 会按兜底策略走（询问用户或 mtime）。
 
@@ -385,13 +394,15 @@ Worktree 绝对路径先映射成“Worktree 根 + 相对路径”，再映射�
 
 ## Phase 4：索引
 
-生成 `<KBR>/INDEX.md`。**末尾必须写入元信息区**（`codewise_version`、`baseline_commit`、`synced_at`、`scope_root`、`anchor_kind`、`multi_codetree`、`session_sources`、`worktree_count`、`known_worktrees`），增量更新依赖此信息计算 git 差量与会话边界，后几项披露最近一次会话扫描的覆盖范围。若不是 git 仓库，`baseline_commit` 写 `null`。分支归属由目录结构保证，因此不需要漂移检测字段。
+生成 `<KBR>/INDEX.md`（纯内容），**同步状态另写 `<KB>/_sync.json`**（`codewise_version`、`baseline_commit`、`synced_at`、`scope_root`、`multi_codetree`、`session_sources`、`worktree_count`、`known_worktrees`）。字段定义与跨机器冲突解决规则见 [references/storage-layout.md](references/storage-layout.md)。若不是 git 仓库，`baseline_commit` 写 `null`。
+
+**为什么分离**：这些字段每次运行必变，留在 INDEX.md 里会让两台机器各跑一次后的 merge **必然**冲突。分支归属由目录结构保证，因此不需要漂移检测字段。
 
 `synced_at` **必须用完整 ISO 8601 时间戳**（精确到秒，含时区），不要只写日期——Phase U 的会话边界判断依赖这个精度。
 
 INDEX.md 的完整模板（各分区结构 + 末尾同步元信息区的全部字段定义）见 [references/index-template.md](references/index-template.md)，生成前完整读取。
 
-**元信息区必须写在文件末尾的 `codewise-meta` 标签内**，增量更新依赖它计算 git 差量、判定会话提取边界，以及回传 `known_worktrees`。缺失或被手工改坏会导致下次 update 退化成全量重扫。
+`_sync.json` 是增量更新的依据（算 git 差量、判定会话提取边界、回传 `known_worktrees`）。缺失或被改坏会导致下次 update 退化成全量重扫。
 
 **空分类不出现在 INDEX.md 中。**
 
@@ -672,7 +683,7 @@ git -C <worktree-root> status --short -- <mapped-scope>
 2. 更新 INDEX.md(新增/删除条目)
 3. 检查互链完整性(同 Phase 5)
 4. 确认 `<ROOT>/AGENTS.md` 与 `<ROOT>/CLAUDE.md` 中的知识库指引仍然存在
-5. **最后**才更新 INDEX.md 元信息区：`baseline_commit` 改为当前 `git rev-parse HEAD`，`synced_at` 改为当前完整 ISO 8601 时间戳，并刷新 `session_sources`、`worktree_count` 与 `known_worktrees`（后者原样写入发现脚本输出的 `project.known_worktrees`，只增不减）
+5. **最后**才更新 `<KB>/_sync.json`：`baseline_commit` 改为当前 `git rev-parse HEAD`，`synced_at` 改为当前完整 ISO 8601 时间戳，并刷新 `session_sources`、`worktree_count` 与 `known_worktrees`（后者原样写入发现脚本输出的 `project.known_worktrees`，只增不减）
 6. 提交知识库仓库并推送本地镜像（见 [references/storage-layout.md](references/storage-layout.md)）；GitHub 推送失败只报告，不阻塞
 
 **为什么要这个顺序?** 如果中途崩了,baseline 没更新,下次 update 仍然从旧 baseline 算 diff——会重复处理这次没改完的部分,但不会丢东西。**重跑是安全的**。

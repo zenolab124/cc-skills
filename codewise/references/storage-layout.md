@@ -49,9 +49,11 @@ MAIN=$(git worktree list --porcelain | head -1 | cut -d' ' -f2)
 ```
 <ROOT>/docs/knowledge/         # 独立 git 仓库
 ├── .git/                      # 知识库自己的版本历史
-├── _identity.json             # 项目身份锚点
-├── _meta.json                 # anchor_kind + 主线分支的实际名字（可能是 master）
-├── .lock                      # 并发锁
+├── .gitignore                 # 必须含 .lock —— 见下方"跨机器同步"
+├── _identity.json             # 项目身份锚点（静态）
+├── _meta.json                 # anchor_kind + 主线分支实际名（静态，极少变）
+├── _sync.json                 # 上次同步状态（每次运行必变，与内容分离）
+├── .lock                      # 并发锁（不提交）
 ├── INDEX.md                   # 主线索引 ← 最常访问的路径
 ├── domains/ shared/ decisions/ integrations/ workflows/ pitfalls/
 ├── .branches/
@@ -100,9 +102,43 @@ git 对嵌套仓库有内置保护：`git clean -xfd` 会打印「跳过仓库 d
 
 每次运行开始就校验。不匹配时**硬失败**并打印双方实际值，不要自动放行——这通常意味着 `docs/knowledge/` 被复制到了别的项目，继续写入会污染错误项目的知识库。合法迁移（换托管、仓库重建）由用户显式传 `reidentify` 参数覆盖。
 
+## 同步状态与元信息
+
+`baseline_commit`、`synced_at` 这些**每次运行必变**的字段放在 `<KB>/_sync.json`，**不放 INDEX.md**：
+
+```json
+{
+  "codewise_version": 3,
+  "baseline_commit": "<主仓库 git rev-parse HEAD>",
+  "synced_at": "<完整 ISO 8601，精确到秒含时区>",
+  "scope_root": "<ROOT 相对仓库根的路径>",
+  "multi_codetree": "<有效代码树清单>",
+  "session_sources": "<来源:数量>",
+  "worktree_count": 0,
+  "known_worktrees": ["<相对主工作树的路径>"]
+}
+```
+
+**为什么必须分离**：这两个字段每次运行都变，放在 INDEX.md 里意味着两台机器各跑一次后，merge 时**必然**在这两行冲突——不是概率问题，是每次都会。分离后 INDEX.md 的合并退化成纯内容合并，多数情况 git 能自动处理；顺带 INDEX.md 也不再每次运行都产生 diff。
+
+`_meta.json`（`anchor_kind` + 主线分支名）是**静态**信息，极少变，所以不与 `_sync.json` 合并——否则又把静态内容拖进高频变更文件。
+
+### 冲突解决规则
+
+两台机器各自跑过后 `_sync.json` 分叉，按以下规则取值：
+
+| 字段 | 规则 | 理由 |
+|---|---|---|
+| `baseline_commit` | **取更早的**（`git merge-base --is-ancestor A B` 成功则 A 更早；无祖先关系时取两者的 `merge-base`） | 宁可重扫一段，不可漏扫 |
+| `synced_at` | **取更早的** | 同上，会话提取边界宁可前移 |
+| `known_worktrees` | **取并集** | 它本就是只增不减的累积集合 |
+| 其余披露字段 | 取任一 | 只用于报告，不影响正确性 |
+
 ## 并发锁
 
 `<KB>/.lock` 记录 `pid`、`hostname`、`branch`、`started_at`。获取失败时打印占用者信息并拒绝运行。
+
+**`.lock` 必须写进 `<KB>/.gitignore`。** 否则异常退出留下的锁会被 `git add -A` 提交并 push——另一台机器 pull 后看到一个 hostname 不同的锁，查不了 PID，只能走超时判定，**两小时内拒绝运行**。
 
 陈旧锁：`hostname` 与本机相同时检查 PID 是否存活，不存在则直接清除；跨主机或无法检查时用超时判定（建议 2 小时）。
 
@@ -127,6 +163,14 @@ git 对嵌套仓库有内置保护：`git clean -xfd` 会打印「跳过仓库 d
 - 已配置 `origin` 时每次 commit 后尝试 push，**失败绝不阻塞流程**，只在报告里留一行「远端未同步，本地镜像已保存，N 个 commit 待推送」
 
 **跨机器同步需要两条腿**：知识库走 git remote，**会话目录走文件同步**（syncthing / rsync `~/.claude/projects/`）。只做前者的话，另一台机器的会话仍然扫不到，那边的知识库会缺掉最有价值的部分。做之前先想清楚是否两条都要。
+
+跨机器还有三处必须注意：
+
+1. **`.lock` 不能进版本库**（见上方并发锁）
+2. **主仓库可能落后于知识库** — 拉了 KB 但没拉主仓库时，`_sync.json` 里的 `baseline_commit` 是当前 HEAD 的"未来"。此时 `merge-base baseline HEAD` 会退到更早的点，差量范围为空，codewise **静默什么都不做**。所以运行前必须检测 `git merge-base --is-ancestor <baseline> HEAD`，失败就提示先 `git pull` 主仓库（见 SKILL.md Phase 0）
+3. **`known_worktrees` 的相对路径在另一台可能指向别的东西** — 概率极低（需同名且同相对位置），且 stale Worktree 的会话仍要过内容过滤，影响可控；但报告里应如实标注这类条目"在本机不存在"
+
+会话文件本身跨机器同步是**安全**的：文件名是 UUID，每台机器产生自己的，双向同步不会冲突，代价只是每台都有全量副本。
 
 一个项目一个知识库仓库，不要多项目共用——分支目录的归属推导依赖单一分支拓扑。
 
