@@ -76,7 +76,10 @@ fi
 **先做旧格式守卫。** 判据是 `<ROOT>/docs/knowledge/` **是不是独立 git 仓库**：
 
 ```bash
-git -C <ROOT>/docs/knowledge rev-parse --git-dir 2>/dev/null
+# 注意：不能用 rev-parse --git-dir —— 它在主仓库追踪的普通子目录里同样成功
+# （向上找到父仓库的 .git），会把旧格式误判成新格式。必须比较仓库根：
+top=$(git -C <ROOT>/docs/knowledge rev-parse --show-toplevel 2>/dev/null)
+[ "$top" = "$(cd <ROOT>/docs/knowledge && pwd -P)" ]   # 相等才是独立仓库
 ```
 
 - 目录不存在 → 首次生成，正常流程
