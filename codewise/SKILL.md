@@ -1,6 +1,6 @@
 ---
 name: codewise
-description: 项目级记忆库生成与维护 — 扫描代码库、全部 Git Worktree 与项目相关的多 Agent 会话（Codex、Claude Code、Gemini CLI、OpenCode、Cursor、Aider 及可扩展来源），生成网状互链的模块化知识库（独立 git 仓库，挂在 git-common-dir 下），帮助人和 AI 快速理解项目。支持首次生成、增量更新、强制重建和局部刷新，并包含多代码树检测、接口契约速查、pitfalls/decisions 交叉验证与架构整体观。Use when user says "codewise", "/codewise", "$codewise", "knowledge", "生成知识库", "更新知识库", "重建知识库", "document the project", "create knowledge base", or when onboarding to a new project and need structured documentation.
+description: 项目级记忆库生成与维护 — 扫描代码库、全部 Git Worktree 与项目相关的多 Agent 会话（Codex、Claude Code、Gemini CLI、OpenCode、Cursor、Aider 及可扩展来源），生成网状互链的模块化知识库（docs/knowledge/，被 gitignore 的独立 git 仓库），帮助人和 AI 快速理解项目。支持首次生成、增量更新、强制重建和局部刷新，并包含多代码树检测、接口契约速查、pitfalls/decisions 交叉验证与架构整体观。Use when user says "codewise", "/codewise", "$codewise", "knowledge", "生成知识库", "更新知识库", "重建知识库", "document the project", "create knowledge base", or when onboarding to a new project and need structured documentation.
 ---
 
 # 项目知识库
@@ -19,10 +19,20 @@ description: 项目级记忆库生成与维护 — 扫描代码库、全部 Git 
 
 扫描用户本次请求，提取第一个**实际存在的目录路径**作为 `<ROOT>`（子项目根）；其余文字作为 scope description 保留给后续阶段。若未提供路径，`<ROOT>` 默认为 `.`（整个仓库，行为与旧版一致）。
 
-**知识库位置：** 知识库不在主仓库工作树里，而是 `git-common-dir` 下的独立 git 仓库。开始前完整读取 [references/storage-layout.md](references/storage-layout.md)，据此解析 `<KB>`、`<SCOPE>` 与本次读写的 `<KBR>`，并完成 `_identity.json` 校验与加锁。**必须用 `--path-format=absolute`**，否则主工作树与 Worktree 会读写两个不同位置。
+**知识库位置：** `<KB>` = `<ROOT>/docs/knowledge` —— 位置直观，但**它不是主仓库的内容**：主仓库把它 gitignore，它自己是独立 git 仓库。开始前完整读取 [references/storage-layout.md](references/storage-layout.md)，据此解析 `<KBR>`、完成 `_identity.json` 校验与加锁。
+
+**主仓库侧的三项前置检测（首次生成时）：**
+
+| 检测 | 强度 | 处理 |
+|---|---|---|
+| 主仓库不是 git 仓库 | **询问一次** | 说明 `git init` 能拿回什么（Worktree 打捞、分支目录、三方合并、baseline 差量、身份锚点），以及首次做成本最低。拒绝则记入 `_meta.json` 的 `degraded_acknowledged`，之后不再问 |
+| 是 git 但零 commit | **询问一次** | 没有首个 commit 就建不了身份锚点，也没有 baseline。提示先做一次 commit |
+| `.gitignore` 未含 `/docs/knowledge/` | 自动补 | 缺这条知识库会被主仓库追踪，退回旧方案的全部问题 |
+
+主仓库**没有 remote 完全不影响** codewise —— 身份锚点用首个 commit hash，不用 remote URL。
 
 **之后所有路径占位符按以下规则解析**：
-- 知识库输出位置：`<KBR>/`（`<KBR>` 由归属分支决定，见 [references/branch-resolution.md](references/branch-resolution.md)）
+- 知识库输出位置：`<KBR>/`（归属主线时就是 `<ROOT>/docs/knowledge/`，见 [references/branch-resolution.md](references/branch-resolution.md)）
 - 注册指引写入：`<ROOT>/AGENTS.md` 与 `<ROOT>/CLAUDE.md`（按 Phase 6 的兼容策略）
 - 代码扫描范围：Phase 1 读文档、Phase 1.2 子代理扫描范围、Phase U 的 `git diff` pathspec，全部限定在 `<ROOT>` 内
 - 子项目外的文件不读、不扫、不链接。仓库根的 `AGENTS.md` / `CLAUDE.md` 可作为外层上下文参考，但不作为事实源，也不修改
@@ -54,9 +64,19 @@ fi
 
 ## 模式判断
 
-**先做旧格式守卫。** `<ROOT>/docs/knowledge/INDEX.md` 存在、而 **`<KB>/<SCOPE>/main/INDEX.md`** 不存在时：**停止并报告需要人工迁移，不做任何写入。** 这是旧版把知识库放在工作树里留下的产物，把它当成"首次生成"会重新全库扫描并丢弃已有的手写条目。迁移需要人工判断，不在本 skill 范围内（详见 [references/storage-layout.md](references/storage-layout.md)）。
+**先做旧格式守卫。** 判据是 `<ROOT>/docs/knowledge/` **是不是独立 git 仓库**：
 
-守卫判定的是 `main/`，**不是 `<KBR>`**——它问的是"这个 scope 迁移过没有"，与当前归属哪条分支无关。用 `<KBR>` 会在"主线已迁移、但在功能分支上首次建独立目录"时误触发（此时 `branches/<slug>/INDEX.md` 本就不存在），把正常流程整个卡死。
+```bash
+git -C <ROOT>/docs/knowledge rev-parse --git-dir 2>/dev/null
+```
+
+- 目录不存在 → 首次生成，正常流程
+- 是独立 git 仓库 → 新格式，继续
+- **存在但不是 git 仓库** → ⛔ **停止**，报告需要人工迁移，不做任何写入
+
+第三种是旧版把知识库当普通文件提交进主仓库的产物。当成"首次生成"会重新全库扫描并丢弃已有的手写条目。迁移需人工判断，不在本 skill 范围内（详见 [references/storage-layout.md](references/storage-layout.md)）。
+
+另外：已是独立仓库但**没被 gitignore** → 警告并提示补 `.gitignore` + `git rm -r --cached`，**不阻塞**。
 
 然后检查 `<KBR>/INDEX.md` 是否存在：
 
@@ -66,7 +86,7 @@ fi
 - **存在 + 参数含 `rebuild`** → 强制重建（重新执行首次生成流程，会覆盖现有条目；**必须向用户明确告知并等待确认后再执行**）
 - **存在 + 参数含 `refresh-docs`** → **局部刷新 INDEX 的"项目文档导航"区**(Phase R,只跑 Step 4.6 + Phase 1.1 文档简介,不动其他条目,不更新 baseline_commit)
 - **存在 + 参数含 `refresh-interfaces`** → **局部刷新 INDEX 的"接口契约速查"区**(Phase R,只跑 Step 4.5,同上不动其他)
-- **存在 + 参数含 `merge <branch>`** → **并入分支知识库**（Phase M，把 `branches/<slug>/` 三方合并进 `main/`）
+- **存在 + 参数含 `merge <branch>`** → **并入分支知识库**（Phase M，把 `.branches/<slug>/` 三方合并进主线）
 
 **重建路径必须显式触发，默认走 update。** 这是为了保护用户手动编辑过的条目，避免误覆盖。
 
@@ -400,14 +420,12 @@ INDEX.md 的完整模板（各分区结构 + 末尾同步元信息区的全部�
 <!-- codewise-registry:start -->
 ## 📚 知识库
 
-知识库由 **codewise** skill 生成,不在工作树内。入口:
+知识库入口:[`docs/knowledge/INDEX.md`](docs/knowledge/INDEX.md)
 
-```bash
-# 主线
-"$(git rev-parse --path-format=absolute --git-common-dir)"/codewise/<SCOPE>/main/INDEX.md
-# 当前分支若有独立知识库,则改读 branches/<分支 slug>/INDEX.md;没有则读主线那份
-# (此时它是主线视角,不含本分支改动)
-```
+它由 **codewise** skill 生成,是一个**被 gitignore 的独立 git 仓库**——位置在工作树里方便查阅,但不属于本仓库的内容,不会随分支切换或合并变动。
+
+- 当前分支若有独立知识库,改读 `docs/knowledge/.branches/<分支 slug>/INDEX.md`;没有就读上面那份(此时它是主线视角,不含本分支改动)
+- 在 git worktree 中工作时该目录不存在,先定位主工作树:`git worktree list --porcelain | head -1`
 
 **任务起手式(硬约束)**:每个新任务第一步读取 INDEX.md(本会话已读过则跳过)。**不读 = 默认从零摸索 = 重复踩前人已经记录过的坑**。
 
@@ -742,12 +760,12 @@ R.4 报告
 
 流程骨架：
 
-1. 确认 `branches/<slug>/` 存在，读 `_meta.json` 拿到原始分支名与 `forked_from`
+1. 确认 `<KB>/.branches/<slug>/` 存在，读 `_meta.json` 拿到原始分支名与 `forked_from`
 2. 确认代码侧已合并（`git merge-base --is-ancestor <branch> HEAD`）；未合并则停下询问——知识不该超前于代码
 3. 对分支目录里的每个文件做条目级三方合并；`_deleted` 清单按删除理由分别处理
 4. 跨路径语义去重（只扫本次新引入的条目，粗筛后再判断，**判定重复也不自动合并**）
-5. 重建 `main/INDEX.md`，检查互链完整性
-6. `branches/<slug>/` 移入 `archive/`；分支是废弃而非合并的，其因果断言先按 `unmerged` + 分支已删规则进 `main/decisions/` 标 `rejected`
+5. 重建 `<KB>/INDEX.md`，检查互链完整性
+6. `.branches/<slug>/` 移入 `.archive/`；分支是废弃而非合并的，其因果断言先按 `unmerged` + 分支已删规则进主线 `decisions/` 标 `rejected`
 7. 提交知识库仓库并推送本地镜像
 
 **因果类条目（`pitfalls`/`decisions`）的合并语义是并集**——一个坑不会因为另一条分支没记录就不成立。只有状态类条目才可能真冲突，且以合并后的当前代码裁决。
