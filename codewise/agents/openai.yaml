@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codewise 项目知识库"
+  short_description: "跨代码、全部 Worktree 与多 Agent 会话维护项目知识库"
+  default_prompt: "使用 $codewise 扫描代码、全部 Git Worktree 与多 Agent 会话，更新当前项目知识库。"

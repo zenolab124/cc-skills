@@ -1,53 +1,64 @@
 ---
 name: codewise
-description: 项目级记忆库生成与维护 — 扫描代码库 + 项目相关的 Claude Code 会话历史，生成网状互链的模块化知识库（docs/knowledge/），帮助人和 AI 快速理解项目。支持首次生成（/codewise）、增量更新（/codewise 或 /codewise update）和强制重建（/codewise rebuild）。包含多代码树检测(自动识别 src-tauri/、uniCloud-*/、packages/*/ 等)、接口契约速查(让 AI 一进项目掌握所有对外接口)、pitfalls 信号扩展+交叉验证、架构整体观必出等强化。Use when user says "codewise", "/codewise", "knowledge", "生成知识库", "更新知识库", "重建知识库", "document the project", "create knowledge base", or when onboarding to a new project and need structured documentation.
-argument-hint: "[update|rebuild] [path] [scope description]"
+description: 项目级记忆库生成与维护 — 扫描代码库、全部 Git Worktree 与项目相关的多 Agent 会话（Codex、Claude Code、Gemini CLI、OpenCode、Cursor、Aider 及可扩展来源），生成网状互链的模块化知识库（独立 git 仓库，挂在 git-common-dir 下），帮助人和 AI 快速理解项目。支持首次生成、增量更新、强制重建和局部刷新，并包含多代码树检测、接口契约速查、pitfalls/decisions 交叉验证与架构整体观。Use when user says "codewise", "/codewise", "$codewise", "knowledge", "生成知识库", "更新知识库", "重建知识库", "document the project", "create knowledge base", or when onboarding to a new project and need structured documentation.
 ---
 
 # 项目知识库
 
 扫描代码库，生成网状互链的模块化知识库。AI 读 INDEX.md 按需跳转，不挤上下文。
 
-**核心原则：Opus 编排，Sonnet 读码。** Opus 不直接读代码文件，所有代码分析委托给 Explore 子代理。
+**核心原则：主代理编排，子代理分片精读。** 使用当前运行时可用的子代理并行读取代码和会话；主代理负责 scope、事实边界、交叉验证与最终写入。若当前运行时不支持子代理，按相同分组串行处理，不得跳过任何文件或会话。
 
 ## 目标
 
-$ARGUMENTS
+从用户本次请求或 Skill 调用参数中读取模式、路径与 scope description；不要依赖某个客户端专属的 `$ARGUMENTS` 注入。
 
 ---
 
 ## Phase 0：解析 scope
 
-扫描 `$ARGUMENTS`，提取第一个**实际存在的目录路径**作为 `<ROOT>`（子项目根）；其余文字作为 scope description 保留给后续阶段。若未提供路径，`<ROOT>` 默认为 `.`（整个仓库，行为与旧版一致）。
+扫描用户本次请求，提取第一个**实际存在的目录路径**作为 `<ROOT>`（子项目根）；其余文字作为 scope description 保留给后续阶段。若未提供路径，`<ROOT>` 默认为 `.`（整个仓库，行为与旧版一致）。
 
-**之后所有路径占位符都相对 `<ROOT>` 解析**：
-- 知识库输出位置：`<ROOT>/docs/knowledge/`
-- 注册指引写入：`<ROOT>/CLAUDE.md`
-- Phase 1 读文档、Phase 1.2 子代理扫描范围、Phase U 的 `git diff` pathspec，全部限定在 `<ROOT>` 内
-- 子项目外的文件不读、不扫、不链接。仓库根的 CLAUDE.md 可作为外层上下文参考，但不作为事实源，也不修改
+**知识库位置：** 知识库不在主仓库工作树里，而是 `git-common-dir` 下的独立 git 仓库。开始前完整读取 [references/storage-layout.md](references/storage-layout.md)，据此解析 `<KB>`、`<SCOPE>` 与本次读写的 `<KBR>`，并完成 `_identity.json` 校验与加锁。**必须用 `--path-format=absolute`**，否则主工作树与 Worktree 会读写两个不同位置。
 
-**关于会话 jsonl 路径(Phase 3 全项目会话扫描 + Phase U.2.5 跨会话扫描会用到):** Claude Code 会话文件存在 `~/.claude/projects/<sanitized-cwd>/` 下,目录名是**用户当时启动 Claude Code 的 cwd**(路径中的 `/` 替换成 `-`),**不一定等于 `<ROOT>`**。比如用户在仓库根启动 Claude Code 但 `<ROOT>` 是子目录,jsonl 仍在仓库根对应的目录里。
+**之后所有路径占位符按以下规则解析**：
+- 知识库输出位置：`<KBR>/`（`<KBR>` 由归属分支决定，见 [references/branch-resolution.md](references/branch-resolution.md)）
+- 注册指引写入：`<ROOT>/AGENTS.md` 与 `<ROOT>/CLAUDE.md`（按 Phase 6 的兼容策略）
+- 代码扫描范围：Phase 1 读文档、Phase 1.2 子代理扫描范围、Phase U 的 `git diff` pathspec，全部限定在 `<ROOT>` 内
+- 子项目外的文件不读、不扫、不链接。仓库根的 `AGENTS.md` / `CLAUDE.md` 可作为外层上下文参考，但不作为事实源，也不修改
 
-定位策略:
-- 取当前 Claude Code 进程的 cwd(即用户启动时的工作目录),换算成 `~/.claude/projects/<sanitized-cwd>/`
-- 该目录下的 jsonl **包含跨多个子项目的会话内容**,不能假设"目录里的 jsonl 都和 `<ROOT>` 相关"
-- 必须用**会话内容里出现的文件路径**做交叉过滤(比如 jsonl 里提到的 file_path、Bash 命令的 cwd 等),只保留涉及 `<ROOT>` 内文件的会话
+**会话来源与 Worktree 项目身份：** 不要从当前 cwd 手拼 Claude Code 目录。完整读取 [references/session-sources.md](references/session-sources.md)，并始终用 `scripts/discover_sessions.py` 生成统一会话清单。项目身份以 Git `git-common-dir` 为锚点；同一项目的主工作树、Codex 临时工作树与其他 `git worktree` 都要覆盖。目录/hash 命中只是候选，子项目必须再用文件操作、tool cwd、diff 等内容证据过滤。
 
-**确认 `<ROOT>`：** 开始 Phase 1 前，先向用户明确告知解析结果（例如"将为 `apps/web/` 生成知识库，输出到 `apps/web/docs/knowledge/`"），等待确认后再继续。
+**已删除 Worktree 的会话打捞（必做）：** 若 INDEX 元信息区有 `known_worktrees`，把每一项通过 `--known-worktree` 回传给发现脚本。这些路径已不在 `git worktree list` 中，但会话文件仍在磁盘上——不回传就永久发现不了。每次运行结束都要把脚本输出的 `project.known_worktrees` 原样写回元信息区（见 Phase 4 / U.6）。标记 `stale=true` 的 Worktree 只用于会话路径匹配，没有 HEAD/branch，因此其会话一律按 `unknown-branch` 保守处理。
 
-**过期检测（仅当 INDEX.md 已存在 + 是 git 仓库时执行）：** 确认 `<ROOT>` 后，读 `<ROOT>/docs/knowledge/INDEX.md` 末尾的元信息区，提取 `baseline_commit`。若存在，执行：
+**报告 scope 与归属：** 开始 Phase 1 前向用户告知解析结果——`<ROOT>`、`<KBR>` 的位置、本次归属的分支目录（例如"将为 `apps/web/` 生成知识库，写入 `<KB>/apps-web/main/`，归属主线"）。**报告后直接继续，不阻塞。**
+
+**唯一需要停下来问的情况**：首次在某个非主线分支上运行，且该分支还没有自己的知识库目录——此时按 [references/branch-resolution.md](references/branch-resolution.md) 展示推导出的归属，问一次是否建独立目录。这个选择记入分支登记表，同一分支只问一次。
+
+**过期检测（仅当 `<KBR>/INDEX.md` 已存在 + 主仓库是 git 仓库时执行）：** 读元信息区，提取 `baseline_commit`，报告距上次同步的累计 commit 数：
 
 ```bash
-git rev-list --count <baseline_commit>..HEAD -- <ROOT>
+comparison_base=$(git merge-base <baseline_commit> HEAD || true)
+if [ -n "$comparison_base" ]; then
+  git rev-list --count "$comparison_base"..HEAD -- <ROOT>
+else
+  echo "baseline 与当前 HEAD 没有共同祖先；无法计算可靠的 commit 数。"
+fi
 ```
 
-将累计 commit 数和 `synced_at` 一并告知用户（例如"距上次同步 2026-04-15 累计 23 个 commits"）。**这只是信息披露，不阻塞流程。** 若 `baseline_commit` 不存在（旧版生成的知识库）、commit 已被 rebase 冲掉、或非 git 仓库，提示原因并继续——后续 Phase U 会按兜底策略走（询问用户或 mtime）。
+把累计 commit 数和 `synced_at` 一并告知用户（例如"距上次同步 2026-04-15 累计 23 个 commits"）；若 `comparison_base` 与 `baseline_commit` 不同，说明发生过 rebase/分叉，用共同祖先计数并告知。**这只是信息披露，不阻塞流程。** 若 `baseline_commit` 不存在、commit 已被 rebase 冲掉、或非 git 仓库，提示原因并继续——后续 Phase U 会按兜底策略走（询问用户或 mtime）。
+
+分支归属由目录结构物理保证（每个分支读写自己的目录），因此**不需要分支漂移检测**：不会出现"知识库在另一条分支上生成"的情况。仍需坚持的是事实边界——只有当前代码、当前 HEAD 的历史或明确的会话历史分支证据能验证时，才把会话结论写入当前状态条目。
 
 ---
 
 ## 模式判断
 
-检查 `<ROOT>/docs/knowledge/INDEX.md` 是否存在：
+**先做旧格式守卫。** `<ROOT>/docs/knowledge/INDEX.md` 存在、而 **`<KB>/<SCOPE>/main/INDEX.md`** 不存在时：**停止并报告需要人工迁移，不做任何写入。** 这是旧版把知识库放在工作树里留下的产物，把它当成"首次生成"会重新全库扫描并丢弃已有的手写条目。迁移需要人工判断，不在本 skill 范围内（详见 [references/storage-layout.md](references/storage-layout.md)）。
+
+守卫判定的是 `main/`，**不是 `<KBR>`**——它问的是"这个 scope 迁移过没有"，与当前归属哪条分支无关。用 `<KBR>` 会在"主线已迁移、但在功能分支上首次建独立目录"时误触发（此时 `branches/<slug>/INDEX.md` 本就不存在），把正常流程整个卡死。
+
+然后检查 `<KBR>/INDEX.md` 是否存在：
 
 - **不存在** → 首次生成（Phase 1-6，包含代码全文件精读 + 项目相关会话全扫）
 - **存在 + 无参数** → **默认增量更新（Phase U）**
@@ -55,6 +66,7 @@ git rev-list --count <baseline_commit>..HEAD -- <ROOT>
 - **存在 + 参数含 `rebuild`** → 强制重建（重新执行首次生成流程，会覆盖现有条目；**必须向用户明确告知并等待确认后再执行**）
 - **存在 + 参数含 `refresh-docs`** → **局部刷新 INDEX 的"项目文档导航"区**(Phase R,只跑 Step 4.6 + Phase 1.1 文档简介,不动其他条目,不更新 baseline_commit)
 - **存在 + 参数含 `refresh-interfaces`** → **局部刷新 INDEX 的"接口契约速查"区**(Phase R,只跑 Step 4.5,同上不动其他)
+- **存在 + 参数含 `merge <branch>`** → **并入分支知识库**（Phase M，把 `branches/<slug>/` 三方合并进 `main/`）
 
 **重建路径必须显式触发，默认走 update。** 这是为了保护用户手动编辑过的条目，避免误覆盖。
 
@@ -70,194 +82,15 @@ git rev-list --count <baseline_commit>..HEAD -- <ROOT>
 
 ### 1.0 多代码树检测 + 动态扩展名推断
 
-**主流程必须真做这步——把"找代码树"从"子代理凭印象扫描"变成"主流程机械检测"。**
+完整规则（代码树检测、monorepo 判定、扩展名推断、排除规则、接口契约抽取、项目文档清单抽取）见 [references/detection.md](references/detection.md)。
 
-#### Step 1: 检测代码树根目录
-
-主流程跑 Bash 检测 `<ROOT>` 内可能存在的多个代码树:
-
-```bash
-# 主代码树
-ls -d <ROOT>/src 2>/dev/null
-ls -d <ROOT>/lib 2>/dev/null
-ls -d <ROOT>/app 2>/dev/null
-
-# 后端/桌面/云函数代码树(常见于全栈项目)
-ls -d <ROOT>/src-tauri 2>/dev/null              # Tauri 桌面端 Rust
-ls -d <ROOT>/uniCloud-* 2>/dev/null             # uni-app 云函数
-ls -d <ROOT>/cloudfunctions 2>/dev/null         # 微信云开发
-ls -d <ROOT>/functions 2>/dev/null              # Firebase / Vercel
-ls -d <ROOT>/server <ROOT>/backend <ROOT>/api 2>/dev/null  # 通用后端
-
-# Monorepo 子包(注意:遇到这种情况优先建议用户给具体子包路径)
-ls -d <ROOT>/packages/*/src 2>/dev/null
-ls -d <ROOT>/apps/*/src 2>/dev/null
-```
-
-存在的目录都是**有效代码树**。所有树都要被覆盖,**不能假设单一 src 入口**。
-
-#### Step 2: monorepo 检测
-
-```bash
-ls <ROOT>/pnpm-workspace.yaml <ROOT>/lerna.json 2>/dev/null
-grep -l '"workspaces"' <ROOT>/package.json 2>/dev/null
-```
-
-如果检测到 monorepo + `<ROOT>` 是仓库根,**停下提示用户**:
-
-> "检测到 monorepo(pnpm-workspace.yaml / lerna.json / yarn workspaces)。建议给具体子包路径作为 `<ROOT>`(如 `apps/web` 或 `packages/core`),否则跨子包的 imports 路径风格不一致,扫描质量会下降。继续在仓库根跑请确认。"
-
-等用户决定后再继续。
-
-#### Step 3: 从元文件推断扩展名清单
-
-主流程读取 `<ROOT>` 内的项目元文件,**动态生成**该项目应扫描的扩展名:
-
-```
-读 package.json → 加 .js/.jsx/.mjs/.cjs (基础)
-  存在 typescript 依赖 → 加 .ts/.tsx
-  存在 vue 依赖 → 加 .vue
-  存在 svelte → 加 .svelte
-  存在 astro → 加 .astro
-  存在 unbuild/uni-app/dcloudio → 加 .uvue (uni-app 特有)
-  存在 tailwind/unocss/postcss → 加 .css/.scss/.less/.postcss
-
-读 Cargo.toml → 加 .rs
-读 go.mod → 加 .go
-读 pyproject.toml / setup.py / requirements.txt → 加 .py / .pyi
-读 Podfile / Package.swift → 加 .swift / .m / .mm / .h
-读 build.gradle / pom.xml → 加 .kt / .java
-读 Gemfile → 加 .rb
-读 composer.json → 加 .php
-读 mix.exs → 加 .ex / .exs
-
-不存在元文件(纯脚本/教学项目):
-  抽样 <ROOT> 首层文件的扩展名分布,出现 ≥3 次的加入候选
-  
-用户在参数中明确指定的扩展名:无条件加入(覆盖优先级最高)
-```
-
-#### Step 4: 推断排除规则
-
-```
-通用排除: .git、.svn、.hg、.idea、.vscode、coverage、tmp、.cache、*.min.js、*.generated.*、*.gen.*、*-lock.json
-JS/TS: node_modules、.next、.nuxt、.turbo、dist、build、out、.vercel、.netlify
-Rust: target
-Python: __pycache__、.venv、venv、.tox、dist、build、.eggs、*.egg-info
-Go: vendor
-Swift/iOS: Pods、DerivedData、.build
-Java/Kotlin: target、build、out、.gradle
-uni-app: uni_modules、unpackage
-```
-
-#### Step 4.5: 接口契约抽取
-
-**目的**:让 AI 一进项目就掌握"对外调用入口"的全局地图。云函数项目尤其需要——接口零散在多个 cloudfunctions/<name>/index.obj.js 里,不汇总 AI 找不全。
-
-主流程跑机械抽取脚本(按项目类型,有就跑,无就跳过):
-
-```bash
-# Tauri commands
-grep -rn '#\[tauri::command\]' <ROOT>/src-tauri/src/ 2>/dev/null
-
-# 云函数(uni-app/微信云开发/Firebase 等)
-ls -d <ROOT>/cloudfunctions/*/ <ROOT>/uniCloud-*/cloudfunctions/*/ <ROOT>/functions/*/ 2>/dev/null
-
-# REST endpoints(NestJS 装饰器)
-grep -rEn '@(Get|Post|Put|Delete|Patch)\(' <ROOT>/src/ 2>/dev/null
-
-# Express/Koa endpoints
-grep -rEn '(app|router)\.(get|post|put|delete|patch)\(' <ROOT>/src/ 2>/dev/null
-
-# GraphQL/gRPC/OpenAPI 契约文件
-find <ROOT> -name '*.proto' -o -name '*.graphql' -o -name 'schema.gql' \
-  -o -name 'openapi.yaml' -o -name 'swagger.yaml' 2>/dev/null
-
-# 数据库 schema(uniCloud / Prisma)
-ls <ROOT>/uniCloud-*/database/*.schema.json <ROOT>/prisma/schema.prisma 2>/dev/null
-```
-
-**抽取结果汇总成"接口契约清单"**,作为 Phase 4 INDEX.md "## 接口契约速查"区的输入。
-
-**只汇总三件事**(每个接口):
-1. **接口名**(命令名/云函数名/endpoint 路径)
-2. **一句话职责**(从代码注释或函数名推断)
-3. **入口位置**(代码文件路径)
-
-**不抄完整签名**——签名跟代码同步无法保证(每次 update 间隙仍可能滞后),完整签名让 AI 跳代码看更可靠。
-
-**判定边界**(什么算"对外调用入口"):
-- ✅ **跨进程/网络的契约**:Tauri commands、Tauri events、云函数、HTTP endpoints、gRPC、GraphQL
-- ✅ **跨语言边界**:Rust pub fn extern、Wasm exports
-- ✅ **数据库 schema**(改 schema 破坏所有读写方,算契约)
-- ❌ **内部 composable / utility / Pinia store actions**(本项目自己用,改了内部改一遍即可)
-- ❌ **JQL 直接调数据库**(SDK 用法,不是命名接口;真正契约是数据库 schema)
-- ❌ **组件 props/events**(内部组件不是对外接口,除非项目是 SDK/UI 库)
-- ⚠️ **npm 包公开 API**(项目是库时算,是应用时不算)
-
-#### Step 4.6: 项目文档清单抽取 ⭐
-
-**目的**:让 AI 一进项目就知道作者写过哪些权威文档(README / CLAUDE.md / docs/*.md / 设计文档等)。这些**人写文档比知识库自动条目更权威**——作者亲手写,跟代码一起更新。codewise 不能让它们对 AI 隐形。
-
-主流程跑机械抽取,产出文档清单(只列路径,简介在 Phase 1.1 完整读后写):
-
-```bash
-# 根目录约定文档
-ls <ROOT>/{README,CLAUDE,AGENTS,CONTRIBUTING,CHANGELOG,SECURITY}.md 2>/dev/null
-
-# 项目文档目录
-find <ROOT>/{docs,doc,design,specs,architecture} -maxdepth 3 -name '*.md' 2>/dev/null \
-  | grep -v '/knowledge/' \
-  | grep -v '/node_modules/'
-```
-
-**排除规则**:
-- ❌ `<ROOT>/docs/knowledge/**`(自己生成,避免循环引用)
-- ❌ `<ROOT>/node_modules/**`(第三方)
-- ❌ `<ROOT>/dist/`、`<ROOT>/build/`(构建产物)
-- ❌ `<ROOT>/.git/`(版本控制元数据)
-
-**清单格式**(供 Phase 1.1 完整读用):
-
-```
-[
-  "README.md",
-  "CLAUDE.md",
-  "docs/CODEBASE_MAP.md",
-  "docs/server-setup.md",
-  "docs/recognition-api.md",
-  ...
-]
-```
-
-**LICENSE 等纯协议文档不抓**——对 AI 理解项目无价值。
-
-#### Step 5: 报告给用户
-
-跑完后向用户报告检测结果:
-
-```
-检测结果:
-- 有效代码树: [src/, src-tauri/, uniCloud-alipay/, ...]
-- 推断扩展名: [.ts, .tsx, .vue, .rs, ...]
-- 排除规则: [node_modules, target, ...]
-- 监测到的元文件: package.json (deps: vue, typescript, dcloudio), Cargo.toml, ...
-- 接口契约抽取: Tauri commands N 个 / 云函数 M 个 / REST endpoints P 个 / 契约文件 K 个
-- 项目文档清单: N 个(README/CLAUDE/docs/*),将在 Phase 1.1 完整读后写简介
-
-如有遗漏的代码树/扩展名/接口类型/文档,现在告知;否则继续 Phase 1.1。
-```
-
-**这些信息后面会写入**:
-- `multi_codetree` 字段(代码树覆盖)
-- INDEX.md "## 接口契约速查"区(接口清单)
-- INDEX.md "## 项目文档导航"区(文档清单 + 简介)
+**主流程必须真做这步。** 所有检测到的代码树都要覆盖，**不能假设单一 `src` 入口**；检测结果要先报告给用户再进入 Phase 1.1。
 
 ### 1.1 读取已有文档（直接读，不用子代理，全部限定在 `<ROOT>` 内）：
 - `<ROOT>/CLAUDE.md`、`<ROOT>/README.md`、`<ROOT>/AGENTS.md` — 项目说明
 - `<ROOT>/package.json`、`<ROOT>/Cargo.toml`、`<ROOT>/go.mod`、`<ROOT>/Podfile`、`<ROOT>/project.yml` 等 — 技术栈和依赖
 - `<ROOT>` 下的设计文档、架构文档 — 常见位置如 `docs/`、`doc/`、`design/`、`specs/`
-- 仓库根（`<ROOT>` 之上）的 CLAUDE.md 可快速浏览作为外层上下文，但不作为事实源
+- 仓库根（`<ROOT>` 之上）的 `AGENTS.md` / `CLAUDE.md` 可快速浏览作为外层上下文，但不作为事实源
 
 **已有文档的使用策略：读文档获取意图，读代码验证事实，冲突时以代码为准。**
 - 文档中的架构描述、模块划分 → 作为 Phase 2 规划条目的参考输入
@@ -267,7 +100,7 @@ find <ROOT>/{docs,doc,design,specs,architecture} -maxdepth 3 -name '*.md' 2>/dev
 
 **写"项目文档导航"简介(必做)** ⭐:
 
-对 Phase 1.0 Step 4.6 抽取的**每个文档完整读一遍**(用 Read 工具读全文,不要只看 H1+第一段),然后写一段 50-100 字的简介:
+对 Phase 1.0 Step 4.6 抽取的**每个文档完整读一遍**(使用当前运行时的文件读取工具读全文,不要只看 H1+第一段),然后写一段 50-100 字的简介:
 
 - 第一句:**这个文档讲了什么**(主旨)
 - 第二句:**关键内容 / 适用场景**(让 AI 判断要不要打开)
@@ -293,7 +126,7 @@ find <ROOT>/{docs,doc,design,specs,architecture} -maxdepth 3 -name '*.md' 2>/dev
 
 如果已有文档**没有**架构图(纯 README 介绍功能),Phase 2 规划 architecture-overview 时再让子代理基于代码事实生成。
 
-**1.2 启动 Explore 子代理(并行)扫描源码,范围严格限定在 Phase 1.0 检测出的代码树清单内:**
+**1.2 启动子代理（并行）扫描源码，范围严格限定在 Phase 1.0 检测出的代码树清单内：**
 
 每个子代理的任务模板:
 
@@ -371,9 +204,14 @@ domains 中**必须有一个 `architecture-overview` 或 `app-shell` 类的全�
 
 **判定**:如果某次产出的某个分类**条目数显著少于原版**(前一次该项目有 N 条,本次只有 M < N 条),且差异不能用"原版有重复"解释——很可能是 LLM 过度合并/删减,**应该回头检查**。
 
-### 2.2 展示给用户确认
+### 2.2 展示规划
 
-列出每个条目的标题和一句话描述，等待用户确认或调整后再生成。
+列出每个条目的标题和一句话描述，然后**直接继续生成**——不阻塞等待。条目是独立文件，生成后要调整比事前逐条确认便宜得多，而中途停顿会让 codewise 无法无人值守运行。
+
+**只有两种情况停下来问**：
+
+- 条目数异常（> 80 或 < 5）——通常意味着 scope 划错了
+- 检测到 monorepo 且 `<ROOT>` 是仓库根（Phase 1.0 已有此规则）
 
 **不需要的分类可以跳过。** 比如纯库项目可能没有 workflows，新项目可能没有 pitfalls。空分类不创建目录。
 
@@ -382,16 +220,24 @@ domains 中**必须有一个 `architecture-overview` 或 `app-shell` 类的全�
 ### 3.1 创建目录结构
 
 ```bash
-mkdir -p <ROOT>/docs/knowledge/{domains,shared,decisions,integrations,workflows,pitfalls}
+mkdir -p <KBR>/{domains,shared,decisions,integrations,workflows,pitfalls}
 ```
 
 只创建有条目的分类目录。
+
+**同时写 `<KBR>/_meta.json`**，记录本目录的归属：
+
+```json
+{ "anchor_kind": "main", "branch": "<git branch --show-current 的实际结果>" }
+```
+
+分支目录还要额外记 `forked_from`（当时知识库仓库的 HEAD），那是三方合并取 base 的唯一依据。**主线分支名必须实测写入，不能假定是 `main`** —— 目录名是 `main`，分支名可能是 `master`。
 
 ### 3.2 并行生成条目（代码全文件精读）
 
 **两阶段策略：Phase 1 快扫定结构，Phase 3 精读写内容。** 没有"快速版"——首次生成默认就要高质量。
 
-为每个条目（或相关的一组条目）启动 Explore 子代理，子代理必须：
+为每个条目（或相关的一组条目）启动子代理，子代理必须：
 
 1. **全文件精读** — 读取项目中每一个源码文件的完整内容（在子代理负责的范围内），不只是条目相关的文件
 2. **交叉验证条目规划** — 读完代码后，回头检查 Phase 2 的条目规划是否遗漏了功能点，遗漏的追加
@@ -410,42 +256,58 @@ mkdir -p <ROOT>/docs/knowledge/{domains,shared,decisions,integrations,workflows,
 
 ### 3.3 全项目会话扫描（必做）
 
-代码告诉你"是什么"，会话告诉你"为什么/怎么走过来的"。**pitfalls 和 decisions 这两个分类的真正素材永远不在代码里**——只能从历史会话中抢救。这一步和 3.2 并行运行。
+代码告诉你“当前是什么”，会话告诉你“为什么、怎么演变、哪些尝试失败过”。**pitfalls、decisions 和改动意图的重要素材常只存在于历史会话中。** 这一步与 3.2 并行运行。
 
 **操作步骤：**
 
-1. 定位 jsonl 目录：`~/.claude/projects/<sanitized-cwd>/`（见 Phase 0 关于会话 jsonl 路径的说明）
-2. 列出该目录下所有 `.jsonl` 文件
-3. 对每个 jsonl 文件启动一个 Explore 子代理（任务模板见下文）
-4. 子代理输出按会话粒度的信号摘要，主流程汇总后与 3.2 的代码精读结果**交叉验证**：
-   - 同一根因被代码注释 + 多个会话讨论印证 → 高置信度，必入条目
-   - 仅会话讨论但代码已不存在 → 不进 domains/shared/integrations/workflows/pitfalls；**可以进 decisions** 作为决策演变记录（"曾经选过 A 后来换成 B"）
-   - 仅代码有但无会话讨论 → 按代码事实写入
+1. 完整读取 [references/session-sources.md](references/session-sources.md)。
+2. 运行统一发现脚本（`<SKILL_DIR>` 是本 Skill 目录）：
+
+   ```bash
+   python3 <SKILL_DIR>/scripts/discover_sessions.py <ROOT> --pretty
+   ```
+
+3. 向用户报告检测到的 Worktree、来源、候选会话数，以及“检测到但无法自动解析”的来源。候选为 0 的来源不报错。
+4. 每个候选会话启动一个子代理；数量很大时可分批并行，但**不得抽样、只读标题或只读最终回复**。数据库型来源按 `path + selector` 区分会话。
+5. 子代理先做 scope 内容过滤，再按参考文件的“会话提取协议”输出归一化摘要。主流程按 `provider + session_id` 去重，并把 Worktree 路径映射成 `<ROOT>` 相对路径。
+6. 将会话摘要与 3.2 当前代码精读结果、当前分支 git 历史和对应 Worktree 状态交叉验证：
+   - 同一根因被代码注释 + 多个会话印证 → 高置信度，必入条目。
+   - 其他 Worktree 的实现已出现在当前 `<ROOT>` → 可作为当前事实。
+   - 仅存在于未合并分支、已回滚或已删除代码 → 不进 `domains/shared/integrations/workflows/pitfalls`；可进 `decisions` 作为演变记录。
+   - 仅代码有但无会话讨论 → 按代码事实写入，不虚构原因。
+
+**分支来源闸门（不可跳过）：**
+
+- `branch_state=session-branch-matches-scan` 只表示会话历史分支与扫描时 Worktree 分支一致；实现是否仍存在，仍须由当前代码或当前 HEAD 验证后才能写入当前状态条目。
+- `branch_state=session-branch-differs-from-scan` 明确属于另一分支：该会话的实现声明只能写 `decisions`/演变记录或待验证候选；即使当前代码后来已有同样实现，也必须以当前代码/HEAD 为事实源，不能把会话本身当作当前实现证据。
+- `branch_state=unknown-branch` 默认隔离。除非当前代码、当前分支历史或另一条独立证据能复核，否则不把会话结论当作当前事实，并在报告中标记“分支归属未确认”。扫描时 Worktree 的分支只是发现时快照，不能反推会话发生时的分支；若当前代码独立复核通过，仍以代码信号写入当前事实。
+- `head_state=session-head-differs-from-scan` 表示会话记录的是同名分支上的旧提交；它不能证明当前工作树仍有该实现。若 `head_state=unknown-head`，同样按保守规则处理。
+- 当前事实的唯一落点是“当前代码 + 当前 HEAD 历史”；会话负责补充原因、决策和失败尝试，不负责单独宣布某个实现已经存在。
 
 **子代理任务模板：**
 
-```
-完整阅读这个会话 jsonl 的内容,判断该会话是否涉及 `<ROOT>` 内的文件
-(看消息中的 file_path、Bash cwd、文件操作等)。
+```text
+按该来源格式从头到尾完整阅读会话，不要跳跃。
 
-不涉及 → 直接返回"无关",不进一步处理。
+第一步：用文件编辑/补丁路径、tool cwd、git diff/状态等强证据，判断会话是否涉及 `<ROOT>`。
+Worktree 绝对路径先映射成“Worktree 根 + 相对路径”，再映射回当前 `<ROOT>`。
+不涉及 → 返回“无关 + 一句证据”，停止。
 
-涉及 → 提取以下信号(只提取代码里看不出来的信息):
-- pitfalls 候选: 用户报告过的 bug、调试中排除的错误假设、时序/并发/平台坑
-- decisions 候选: "为什么选 A 不选 B"的讨论、被否决的方案
-- workflows 候选: 跨文件/跨模块的操作步骤、易漏点
+涉及 → 输出 references/session-sources.md 规定的归一化摘要，尤其提取：
+- 改动任务、涉及文件、最终结果（已落地/未合并/已回滚/仅讨论/无法确认）
+- pitfalls：bug、错误假设、根因、时序/并发/平台坑
+- decisions：为什么选 A 不选 B、被否方案、权衡
+- workflows：跨文件步骤与易漏点
 
-【隐私边界】写入条目时只输出语义结论(根因、决策、陷阱),
-**不要照抄原始用户消息片段、密钥、含用户名的绝对路径**。
-条目会被 git 追踪。
-
-按会话内的逻辑顺序读,不要跳跃。
+只输出语义结论和 `<ROOT>` 相对路径；不要照抄原始消息、thinking、密钥、用户名或绝对路径。
 ```
 
 **边界情况：**
-- jsonl 目录不存在或为空（项目从未在本机用 Claude Code 跑过）→ 跳过这一步,只做 3.2,不报错
-- 会话数量极多（项目用了一年累计几百个会话）→ 全部处理,接受这个成本
-- 会话讨论的是已被重构掉的旧代码 → 按上面"仅会话讨论但代码已不存在"的规则处理
+
+- 所有来源都为空 → 跳过会话提取，只做 3.2，并明确报告“本机未发现可读的项目会话”。
+- 会话数量极多 → 全部处理，接受成本；可以按来源/Worktree 分批并行。
+- 当前会话仍在写入 → 以当前运行时上下文为准，并按 session id 排除落盘副本的重复摘要。
+- 不稳定数据库、protobuf 或云端会话无法自动读取 → 明确报告并请用户导出 JSON/Markdown 后用 `--source` 加入，不静默遗漏。
 
 ### 3.4 条目互链规则
 
@@ -492,313 +354,24 @@ mkdir -p <ROOT>/docs/knowledge/{domains,shared,decisions,integrations,workflows,
 
 简介可以提到"另见 domains/X 条目"做相互索引,但**不抄文档内容到 knowledge/ 条目**——文档自带链接即可。
 
-### 3.6 主动识别 pitfalls
+### 3.6 / 3.7 主动识别 pitfalls 与 decisions
 
-pitfalls 在大项目下容易偏保守(信号类型不全)。下面**扩展扫描信号清单 + 加交叉验证机制**——确保会话里讨论过的真实 bug 不会从 pitfalls 里漏掉。
+完整的信号扫描清单、交叉验证规则、独立成条原则与条目最低信息量要求，见 [references/signal-extraction.md](references/signal-extraction.md)——**3.2 的子代理任务里就要并发扫描这些信号**，不是事后补。
 
-#### 3.6.1 扫描信号清单(在 3.2 子代理任务中并发扫描)
+两条不可退让的约束：
 
-**注释类**:
-- `// HACK`、`// FIXME`、`// WORKAROUND`、`// XXX` — 显式标记
-- `// NOTE: ...` 后跟超过 30 字的描述 — 通常是非显而易见的约束
-- `// TODO:` **如果说的是"防御代码/兼容性"**(例如"// TODO: remove once X is fixed")— 是真坑
-
-**类型与编译绕行**:
-- `as any` / `as unknown as X` / `// @ts-ignore` / `// @ts-expect-error` / `// eslint-disable-line` — 类型系统绕行处往往有故事
-- Rust 的 `unsafe {}` 块、`unwrap_or_default` 在不该用的地方
-- `# type: ignore` (Python) / `nolint` (Go)
-
-**异常处理特殊逻辑**:
-- retry 循环、exponential backoff
-- catch 后的 fallback / 降级 / 静默 swallow
-- 特定 error code 的特殊处理(NS error code、HTTP status 特判)
-- `defer` / `finally` 块里的清理代码(顺序敏感)
-
-**时序与并发**:
-- `setTimeout(..., 0)`、`requestAnimationFrame` 的双重嵌套(常见为修 layout 时机)
-- 不寻常的 `sleep` / `delay` 数字(`sleep(50)` 这种特定值往往有故事)
-- `Promise.race` / `AbortController` 的边界处理
-- 锁、信号量、原子操作
-
-**平台与版本兼容**:
-- `#ifdef` / `#cfg!()` / `process.platform` / `navigator.userAgent` 判断
-- 浏览器特定 hack(Safari/iOS/IE)
-- 多端编译指令(`#ifdef MP-WEIXIN` 等 uni-app 特有)
-
-**数值与边界**:
-- 浮点比较容差(`abs(a - b) < 1e-9`)
-- 魔法常数(`8192`、`60000`、`0xFF` 这种)
-- 数组/字符串边界处理(off-by-one 修复痕迹)
-
-**序列化与反序列化**:
-- `serde(rename = "...")` / `@SerializedName` 修正字段名
-- TypeScript union 与后端 enum 的对齐(tagged union)
-- JSON 字段大小写转换(camelCase ↔ snake_case)
-- Pinia/Vuex 持久化对 Set/Map 的特殊处理
-
-**资源管理**:
-- localStorage/IndexedDB 配额检测和降级
-- 内存释放、对象池、循环引用拆解
-- 事件监听器的 add/remove 配对
-
-**框架特性陷阱**:
-- Vue 响应式对 `Map`/`Set`/`Date`/`Object.assign` 的特殊行为
-- React `useEffect` 依赖项遗漏的注释痕迹
-- Tauri/Electron 的进程间通信限制(payload 大小、序列化限制)
-
-#### 3.6.2 交叉验证
-
-**Phase 3.3 的会话扫描结束后,做交叉验证**,确保会话里讨论过的 bug 不会被漏到 pitfalls:
-
-```
-信号源汇总:
-  · 代码扫描 pitfalls 候选(3.6.1 各类信号) → 集合 A
-  · 会话扫描 pitfalls 候选(Phase 3.3 子代理输出) → 集合 B
-
-交叉验证规则:
-  · 在 A 也在 B(代码有 hack 注释 + 会话讨论过) → 高置信度,必入 pitfalls
-  · 仅在 A(代码有 hack 但会话没提) → 写入 pitfalls,但 note 标"代码痕迹推断"
-  · 仅在 B(会话讨论但代码看不出) → 写入 pitfalls,但必须验证"代码确实是这么修的",不准凭印象
-  · 在 B 但代码已不存在(被重构掉) → 走 decisions/ 演变记录,不进 pitfalls
-
-零产出报警:
-  会话里出现过 bug 修复 / 调试讨论 / 排除假设 → 但 pitfalls 候选数 = 0 → **异常,重新扫一遍 3.6.1 信号 + 重新读会话**
-  这种"空手而归"在大型项目几乎一定是漏了
-```
-
-#### 3.6.3 跳过该分类的合理条件
-
-只有**同时满足**下面两条才能跳过 `pitfalls/`:
-1. 3.6.1 各类信号在代码里**全都没命中**(不是"主要的没命中",是"全都没命中")
-2. 会话扫描产出了**零 pitfalls 候选**
-
-否则**必须产出至少一个 pitfalls 条目**。原版那种"没找到就跳过"在大项目实测中证明不靠谱——LLM 倾向于"觉得没什么大坑"而过度跳过。
-
-#### 3.6.4 pitfalls 条目结构(尽量包含 What/Why/Action)
-
-每个 pitfalls 条目尽量包含:
-- **What**: 现象/触发条件(代码里能看到的部分)
-- **Why**: 根因(代码里看不出的部分,这是核心)
-- **Action**: 怎么避免/修复(具体的代码姿势)
-
-如果某条目暂时缺一两项,可以先写出来,标注"待补",后续追问用户补齐。**不要因为信息不全就跳过**——有半个总比没有强。
-
-#### 3.6.5 独立成条原则 ⭐(防打包合并)
-
-**每个独立陷阱写成一个独立的 md 文件,不要把多个无关陷阱合并到同一文件**。
-
-✅ 正确:
-- `pitfalls/streaming-text-block-merging.md`(单一陷阱:流式 text 块合并)
-- `pitfalls/serde-frontend-alignment.md`(单一陷阱:Rust enum 与 TS union 字段对齐)
-- `pitfalls/decode-path-greedy.md`(单一陷阱:路径解码贪心匹配)
-
-❌ 错误(打包合并,失去快速扫描能力):
-- `pitfalls/rust-pitfalls.md`(把 8 个不相关的 Rust 陷阱压成一个文件)
-- `pitfalls/vue-pitfalls.md`(把 9 个不相关的 Vue 陷阱压成一个文件)
-
-**判定标准**:如果条目里出现了 ≥2 个**独立的根因或独立的修复姿势**,就该拆。同一根因的不同表现可以合并(比如"X 在场景 A 和场景 B 都会崩"是同一陷阱),不同根因的陷阱必须分开。
-
-**这条规则比"信息量完整"更重要**——读者需要的是"快速定位 + 快速修复",不是"长篇综述"。打包条目违反知识库的核心使用模式。
-
-### 3.7 主动识别 decisions
-
-实测发现 decisions 在两个项目中都偏少(原版 cc-space-tauri 5 个、snap-ub 8 个)——LLM 倾向只把"显眼的选型"(用 Tauri 不用 Electron)写成 decision,漏掉**代码里隐式记录的权衡**。本节扩展信号清单。
-
-#### 3.7.1 扫描信号清单(在 3.2 子代理任务中并发扫描)
-
-**注释类**:
-- 代码注释里的 "chose X over Y because..."、"原本用 X,改成 Y"、"为什么不用 X"
-- "Why ..." 块注释(常见于 Rust/Go 项目)
-- 文件头的"## Design Notes"、"## Trade-offs"
-
-**git 痕迹类**(grep 当前代码即可,不必读 git log):
-- 文件名 `*-old.ts`、`*-deprecated.ts`、`Old*Adapter`(说明换过实现)
-- import 注释掉的 `// import { X } from 'lib-old'`(候选库被否决的痕迹)
-- package.json/Cargo.toml 中 deprecated 依赖的标记
-- README/CHANGELOG 里的 "Migrated from X to Y" 段
-
-**自研 vs 引入的权衡**:
-- 项目内有自实现工具 + 同一目录有相关第三方库依赖(比如自实现 debounce 但又装了 lodash)
-- 项目内有自实现 UI 组件,但 package.json 装了 wot-design-uni / element-plus(说明选择"自研 vs 第三方"的混用策略)
-
-**性能/架构权衡**:
-- 显式的"两级缓存"、"懒加载"、"sharding"等模式
-- 异常的并行/串行选择(rayon 用在哪、为什么不用在别处)
-- 数据库/存储的字段命名缩写(JSON 字段从 `userIdentifier` 缩成 `uid`,空间换性能)
-
-**配置/常量类**:
-- 多套配置文件并存(production/staging/dev 用不同策略)
-- 魔法常数旁边的解释("180MB 阈值 = 实测 iPhone SE 内存上限")
-
-#### 3.7.2 与会话扫描交叉验证
-
-跟 pitfalls 一样,Phase 3.3 会话扫描产出的 decisions 候选要跟代码扫描的交叉:
-
-```
-信号源汇总:
-  · 代码扫描 decisions 候选(3.7.1) → 集合 A
-  · 会话扫描 decisions 候选(Phase 3.3) → 集合 B
-
-合并规则:
-  · 在 A 也在 B(代码痕迹 + 会话讨论过) → 高置信度,必入 decisions
-  · 仅在 A(代码有但会话没提) → 写入 decisions,需补充"为什么"段(读代码意图推断)
-  · 仅在 B(会话讨论过但代码已不存在) → 走"决策演变记录":"曾经选过 X,后来换成 Y"
-```
-
-#### 3.7.3 decisions 条目结构(尽量包含)
-
-- **背景**:什么问题触发了这个决策
-- **方案对比**:有哪些候选(A 是什么、B 是什么)
-- **最终选择**:选了什么、关键原因
-- **副作用**:这个选择带来了什么后续要注意的(可选)
-
-如果某条目暂时缺方案对比(只知道"选了 X"但不知道"否决了 Y"),也可以先写,标注"待补"——不要因为信息不全就跳过。
+- **偏向记录而非遗漏。** 拿不准时默认写入。会话里明明修了 bug 却没产出任何 pitfalls 条目，应视为异常，回头重扫。
+- **一个陷阱一个条目。** 不要把多个不相关的坑打包进一个文件——打包等于让后来的人读不到自己需要的那一条。
 
 ## Phase 4：索引
 
-生成 `<ROOT>/docs/knowledge/INDEX.md`。**末尾必须写入元信息区**（`codewise_version`、`baseline_commit`、`synced_at`、`scope_root`、`multi_codetree`），增量更新依赖此信息计算 git 差量与会话边界,`multi_codetree` 记录本次覆盖的代码树范围。若不是 git 仓库，`baseline_commit` 写 `null`。
+生成 `<KBR>/INDEX.md`。**末尾必须写入元信息区**（`codewise_version`、`baseline_commit`、`synced_at`、`scope_root`、`anchor_kind`、`multi_codetree`、`session_sources`、`worktree_count`、`known_worktrees`），增量更新依赖此信息计算 git 差量与会话边界，后几项披露最近一次会话扫描的覆盖范围。若不是 git 仓库，`baseline_commit` 写 `null`。分支归属由目录结构保证，因此不需要漂移检测字段。
 
 `synced_at` **必须用完整 ISO 8601 时间戳**（精确到秒，含时区），不要只写日期——Phase U 的会话边界判断依赖这个精度。
 
-```markdown
-# [项目名] 知识库
+INDEX.md 的完整模板（各分区结构 + 末尾同步元信息区的全部字段定义）见 [references/index-template.md](references/index-template.md)，生成前完整读取。
 
-快速理解项目的入口。按需跳转，不需要全部阅读。
-
-**技术栈**：[从 Phase 1 探测结果中提取，如 "Vue 3 + TypeScript + uniCloud" 或 "Swift 6 + SwiftUI"]
-
-<!-- codewise-docs:start -->
-## 项目文档导航 ⭐
-
-本项目作者维护的人写文档(README / CLAUDE.md / docs/* / 设计文档),**这些是权威源**——比 knowledge/ 自动生成的更准。AI 一进项目要先知道它们存在。
-
-**简介在 Phase 1.1 完整读后写**(50-100 字),不是看 H1 拍脑袋。
-
-[只列项目实际存在的文档,按内容性质分组(入门 / 架构 / 运维 / 业务 / 实施记录 / 开发日志)。文档少时不必分组,直接列表。]
-
-### 入门 / 项目说明
-- [README.md](../../README.md) — [50-100 字简介,基于完整阅读]
-- [CLAUDE.md](../../CLAUDE.md) — [简介]
-
-### 架构 / 代码地图(如有)
-- [docs/CODEBASE_MAP.md](../CODEBASE_MAP.md) — [简介]
-
-### 运维 / 部署(如有)
-- [docs/server-setup.md](../server-setup.md) — [简介,标注"操作前必读"等关键提示]
-
-### 业务文档(如有)
-- [docs/<name>.md](../...) — [简介]
-
-### 实施记录 / 开发日志(如有)
-- [docs/<name>.md](../...) — [简介]
-<!-- codewise-docs:end -->
-
-<!-- codewise-interfaces:start -->
-## 接口契约速查
-
-本项目所有"对外调用入口"快速索引,**让 AI 一进项目就掌握接口全局地图**(尤其云函数项目接口零散难找)。
-
-**完整签名以代码为准**——本表只列"名 + 职责 + 入口位置",可能滞后一两次 update。
-
-[只列项目实际存在的接口类型,不存在的类型不要出现。每个类型的样板见下方:]
-
-### Tauri Commands(N 个,定义在 src-tauri/src/...)
-
-| 命令 | 职责 | 调用方 |
-|---|---|---|
-| `get_projects` | 获取项目列表 | `useProjects.loadProjects` |
-| ... | ... | ... |
-
-**详情**:[shared/tauri-bridge](shared/tauri-bridge.md) | **完整签名**:src-tauri/src/commands.rs
-
-### Tauri Events(N 个)
-
-| 事件 | 触发时机 | 监听方 |
-|---|---|---|
-| `projects-changed` | 文件监控防抖 1s 后 | `useProjects.listen` |
-
-### 云函数(N 个,见 cloudfunctions/ 或 uniCloud-*/cloudfunctions/)
-
-按类别分组(如有):
-- **autoUpdate***(M 个):`autoUpdateAlbums` | `autoUpdateBundles` | ...
-- **业务**(M 个):...
-- **官方/工具**(M 个):...
-
-**详情**:[integrations/unicloud-alipay](integrations/unicloud-alipay.md)
-
-### REST endpoints(N 个,如有)
-
-| 方法 | 路径 | 实现位置 |
-|---|---|---|
-| GET | /api/users | `src/controllers/user.ts:42` |
-
-### 契约文件(GraphQL/gRPC/OpenAPI/.d.ts)
-
-| 文件 | 类型 | 说明 |
-|---|---|---|
-| `api/openapi.yaml` | OpenAPI | REST 接口完整定义 |
-| `proto/service.proto` | gRPC | 跨语言服务契约 |
-
-### 数据库 Schema(如有)
-
-- `uniCloud-alipay/database/users.schema.json` — 用户表 schema 与权限规则
-- ...
-<!-- codewise-interfaces:end -->
-
----
-
-## 按功能域
-
-| 条目 | 一句话 |
-|------|--------|
-| [条目名](domains/xxx.md) | 描述 |
-
-## 按技术层
-
-| 条目 | 一句话 |
-|------|--------|
-| [条目名](shared/xxx.md) | 描述 |
-
-## 设计决策
-
-| 条目 | 一句话 |
-|------|--------|
-
-## 外部集成
-
-| 条目 | 一句话 |
-|------|--------|
-
-## 工作流
-
-| 条目 | 一句话 |
-|------|--------|
-
-## 踩坑记录
-
-| 条目 | 一句话 |
-|------|--------|
-
----
-
-## 数据流全景
-
-[用文本或 ASCII 画出核心数据流，展示模块间的调用关系]
-
----
-
-<!-- codewise-meta:start -->
-## 同步元信息
-
-- **codewise_version**: `1`
-- **baseline_commit**: `<git rev-parse HEAD 写入；非 git 仓库写 null>`
-- **synced_at**: `<完整 ISO 8601 时间戳，如 2026-04-30T14:23:01+08:00>`
-- **scope_root**: `<ROOT 相对仓库根的路径，根则为 .>`
-- **multi_codetree**: `<Phase 1.0 检测出的有效代码树清单,如 "src/, src-tauri/, uniCloud-alipay/";单代码树写 "src/" 即可>`
-
-> 此区域由 codewise 自动维护，**请勿手动编辑**。增量更新基于 `baseline_commit` 计算 git 差量、基于 `synced_at` 判定会话提取边界。`multi_codetree` 字段记录本次扫描覆盖的代码树范围,便于追溯。
-<!-- codewise-meta:end -->
-```
+**元信息区必须写在文件末尾的 `codewise-meta` 标签内**，增量更新依赖它计算 git 差量、判定会话提取边界，以及回传 `known_worktrees`。缺失或被手工改坏会导致下次 update 退化成全量重扫。
 
 **空分类不出现在 INDEX.md 中。**
 
@@ -806,56 +379,49 @@ pitfalls 在大项目下容易偏保守(信号类型不全)。下面**扩展扫�
 
 1. 检查所有互链是否有效（目标文件存在）
 2. 检查 INDEX.md 中的链接是否完整
-3. 向用户报告：生成了多少条目、多少互链、是否有断链
+3. 检查会话扫描报告是否覆盖所有当前 Worktree，并列出检测到但未解析的来源
+4. 向用户报告：生成了多少条目、多少互链、会话来源/数量、Worktree 数、是否有断链
 
-## Phase 6：注册到 CLAUDE.md
+## Phase 6：注册到 Agent 指引
 
-在 `<ROOT>/CLAUDE.md` 中写入硬约束起手式,**让 AI 不能"隐性跳过"读 INDEX**。
+同时维护 `<ROOT>/AGENTS.md`（Codex 与通用 Agent）和 `<ROOT>/CLAUDE.md`（Claude Code），让不同客户端都能在新任务开始时发现知识库。只修改 `<ROOT>` 内的文件；若 `<ROOT>` 是子项目，不修改仓库根的同名文件。
 
-**软提示("需要理解项目时,先读 INDEX...")实测无效**——AI 经常自我蒙骗"我已经理解了不需要读"。改为**硬约束 + 后果警告**才有效。
+### 每个目标文件的写入策略
 
-### 写入策略(三种情形)
-
-#### 情形 1:`<ROOT>/CLAUDE.md` 不存在
-
-创建文件,写入下面"标准模板"。
-
-#### 情形 2:`<ROOT>/CLAUDE.md` 存在,但**没有 codewise 标签**
-
-检查 CLAUDE.md 里是否已经有用户手写的"知识库"段(标题含"知识库"/"knowledge")。
-
-- **没有相关段** → 在文件末尾追加"标准模板"
-- **有用户手写的相关段** → **停下问用户**:
-  > "检测到 CLAUDE.md 已有自定义知识库段。是否升级为 codewise 硬约束模板?
-  > Y → 替换为标准模板(用户手写内容会丢失,可先 git commit 备份)
-  > N → 保留你的版本不动(下次 update 也不动)"
-
-#### 情形 3:`<ROOT>/CLAUDE.md` 存在,**已有 codewise 标签**
-
-只替换 `<!-- codewise-claude-registry:start --> ... <!-- codewise-claude-registry:end -->` 之间的内容,**标签外用户写的任何内容都不动**。这是 update 时的标准路径。
+1. 文件不存在 → 创建并写入标准模板。
+2. 文件存在且有 `codewise-registry` 标签 → 只替换标签内内容，标签外一字不动。
+3. `CLAUDE.md` 仍使用旧的 `codewise-claude-registry` 标签 → 原位迁移为新标签，不重复追加。
+4. 文件存在、无标签、也无用户手写的“知识库/knowledge”段 → 在末尾追加标准模板。
+5. 文件存在、无标签、但已有用户自定义知识库段 → 停下询问用户是保留原段还是迁移；不得擅自覆盖。
 
 ### 标准模板
 
 ```markdown
-<!-- codewise-claude-registry:start -->
+<!-- codewise-registry:start -->
 ## 📚 知识库
 
-知识库由 **codewise** skill 生成,入口 [`docs/knowledge/INDEX.md`](docs/knowledge/INDEX.md)。
+知识库由 **codewise** skill 生成,不在工作树内。入口:
 
-**任务起手式(硬约束)**:每个新任务第一步 Read INDEX.md(本会话已读过则跳过)。**不读 = 默认从零摸索 = 重复踩前人已经记录过的坑**。
+```bash
+# 主线
+"$(git rev-parse --path-format=absolute --git-common-dir)"/codewise/<SCOPE>/main/INDEX.md
+# 当前分支若有独立知识库,则改读 branches/<分支 slug>/INDEX.md;没有则读主线那份
+# (此时它是主线视角,不含本分支改动)
+```
 
-维护:`/codewise update` 增量更新 | `/codewise rebuild` 强制重建 | `/codewise refresh-docs` 局部刷文档导航 | `/codewise refresh-interfaces` 局部刷接口速查。**禁止手编 `docs/knowledge/`**——它是 codewise 单源生成的领地。
-<!-- codewise-claude-registry:end -->
+**任务起手式(硬约束)**:每个新任务第一步读取 INDEX.md(本会话已读过则跳过)。**不读 = 默认从零摸索 = 重复踩前人已经记录过的坑**。
+
+维护:`codewise update` 增量更新 | `codewise rebuild` 强制重建 | `codewise refresh-docs` 局部刷文档导航 | `codewise refresh-interfaces` 局部刷接口速查（按当前客户端使用 `/codewise`、`$codewise` 或自然语言调用）。**禁止手编知识库目录**——它是 codewise 单源生成的领地。
+<!-- codewise-registry:end -->
 ```
 
 ### 关键设计
 
-- **HTML 标签界定**:跟 INDEX 的 `codewise-{docs,interfaces,meta}:start/end` 同套路,update 时机械替换,不污染用户在标签外的内容
-- **不要写温和措辞**(❌ "需要理解时先读 / 推荐先读") → 改为硬指令("第一步 Read")+ 后果警告("不读 = 重复踩坑")
-- **不抄 INDEX 内容到 CLAUDE.md**:触发词映射 / 反例 / 条目清单都在 INDEX 里,CLAUDE.md 只负责"让 AI 真去 Read INDEX"
-- **仓库根 CLAUDE.md(若 `<ROOT>` 非根)不动** — 只改 `<ROOT>/CLAUDE.md`
+- **HTML 标签界定**:跟 INDEX 的 `codewise-{docs,interfaces,meta}:start/end` 同套路，update 时机械替换，不污染用户内容。
+- **双文件内容保持一致**:`AGENTS.md` 和 `CLAUDE.md` 的标签块使用同一模板，避免不同 Agent 获得不同规则。
+- **不抄 INDEX 内容到指引文件**:指引文件只负责让 Agent 真正读取 INDEX。
 
-**这一步是必须的。** 没有这个硬约束,AI 不会主动查阅知识库——历次实测 codewise 软提示版本 AI 跳过率 >50%。
+**这一步是必须的。** 只写 `CLAUDE.md` 会让 Codex 看不到注册规则，只写 `AGENTS.md` 则无法覆盖 Claude Code。
 
 ---
 
@@ -870,19 +436,61 @@ pitfalls 在大项目下容易偏保守(信号类型不全)。下面**扩展扫�
 仅在 git 仓库且 baseline 存在时执行。**主流程只读元信息和清单，不读完整 diff**——完整 diff 留给 U.5 子代理。
 
 ```bash
-# 演变路径：所有 commit 的 messages
-git log <baseline_commit>..HEAD --oneline -- <ROOT>
+# baseline 被 rebase/分叉时不要直接拿它与 HEAD 做差量；先确定共同祖先。
+current_head=$(git rev-parse HEAD)
+comparison_base=$(git merge-base <baseline_commit> "$current_head" || true)
 
-# 热点文件：变更行数统计
-git diff <baseline_commit>..HEAD --stat -- <ROOT>
+# 没有共同祖先时只能报告“无法比较”，不要执行形如 `..HEAD` 的空范围。
+if [ -n "$comparison_base" ]; then
+  # 演变路径：取完整 commit body，不是 --oneline。标题往往只写“做了什么”，
+  # 而“为什么”写在 body 里——对本机没有会话记录的改动，body 是唯一的根因来源。
+  git log "$comparison_base"..HEAD --format='%h%n%s%n%b%n--' -- <ROOT>
 
-# 变更文件清单：U.5 分组依据
-git diff <baseline_commit>..HEAD --name-only -- <ROOT>
+  # merge commit 的描述常常概括整条分支的意图
+  git log "$comparison_base"..HEAD --merges --format='%h %s%n%b' -- <ROOT>
+
+  # 热点文件：变更行数统计
+  git diff "$comparison_base"..HEAD --stat -- <ROOT>
+
+  # 变更文件清单：U.5 分组依据
+  git diff "$comparison_base"..HEAD --name-only -- <ROOT>
+else
+  echo "无法计算 baseline 与当前 HEAD 的共同祖先；跳过 git 差量，改走兜底策略。"
+fi
 ```
 
+若 `comparison_base` 与 `baseline_commit` 不同，报告“baseline 不在当前分支历史中，已用 merge-base 比较”（通常意味着发生过 rebase 或 squash）；不得把旧分支独有的事实自动带入当前状态。
+
+**非会话证据补采（当本机没有对应会话时必做）：** 改动来自其他人、其他机器，或未保存在本机的 Agent 时，会话扫描会空手而归——而根因恰恰只在那些会话里。此时尽力从以下来源抢救：
+
+- commit body 里的 `Why:` / `Fixes:` / `Refs:` 段落与 issue/PR 编号
+- merge commit 描述（整条分支的意图概括）
+- `<ROOT>` 内的 CHANGELOG / release notes 在该区间的条目
+- 代码注释里解释"为什么"的部分（不是解释"做了什么"的）
+
+这些是低保真替代品，不能等同于会话记录。**据此产出的条目一律标 `evidence: code-only`**，并在 U.6 报告里单列。
+
 主流程产出两份摘要供后续步骤复用：
-- **演变摘要**：commit messages 串起来，理解这段时间项目在做什么
+- **演变摘要**：commit messages（含 body）串起来，理解这段时间项目在做什么以及为什么
 - **变更文件分组**：按功能域 / 顶层目录把变更文件分组，每组将分配一个子代理
+
+### U.1.5 Worktree 时间线采集（轻量、只作候选）
+
+运行 `scripts/discover_sessions.py` 得到的 `project.worktrees[]` 是本项目的完整 Worktree 集合。**跳过 `stale=true` 的条目**——它们已不在注册表中、目录可能已删除，没有 HEAD 可比较，只用于会话路径匹配。除当前 Worktree 外，对每个活跃 Worktree 只采集：
+
+```bash
+# 每个 Worktree 都以自己的 HEAD 计算共同祖先；不能把同一个全局 baseline
+# 直接与所有分叉分支比较，否则会把反向差异/删除误判成当前改动。
+branch_base=$(git -C <worktree-root> merge-base <baseline_commit> HEAD)
+git -C <worktree-root> log "$branch_base"..HEAD --oneline -- <mapped-scope>
+git -C <worktree-root> diff "$branch_base"..HEAD --name-only -- <mapped-scope>
+# 未提交改动必须单独采集，不能混入 branch_base..HEAD 的提交差量。
+git -C <worktree-root> diff --name-only -- <mapped-scope>
+git -C <worktree-root> diff --cached --name-only -- <mapped-scope>
+git -C <worktree-root> status --short -- <mapped-scope>
+```
+
+这些结果用于解释其他 Worktree 会话和识别“未合并/未提交/已回滚”。**它们不是当前 `<ROOT>` 的事实源，也不进入 U.5 的当前条目更新文件清单。** 只有在当前代码或当前分支历史验证后，相关实现才能写成现状。没有 `merge-base` 的 Worktree 只报告为无法比较，不得猜测其变更范围。
 
 ### U.2 当前会话回顾（必做）
 
@@ -903,6 +511,7 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
 | 讨论过"为什么选 A 不选 B" / 否决过某个方案 | `decisions/` | 被否方案、否决原因 |
 | 摸索出跨文件/跨模块的操作步骤 | `workflows/` | 完整步骤 + 易漏点 |
 | 发现代码与文档/直觉不符 | `pitfalls/` | 实际行为 vs 预期 |
+| 改动发生在其他 Worktree | 先校验状态 | Worktree、相对路径、已合并/未合并/已回滚 |
 
 **偏向记录而非遗漏。** 拿不准时默认写入，宁可条目稍多也不要漏掉根因。空手而归（会话里明明修了 bug 却没产出任何 pitfalls 条目）应视为异常，回头再扫一遍会话历史。
 
@@ -916,61 +525,63 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
 
 只读当前会话不够——同一个项目的根因和决策可能散落在多个并行/历史会话里。**必须扫描项目相关的其他会话**,不然每次 update 都只能看到触发 update 那个会话的视角。
 
-**操作步骤:**
+**操作步骤：**
 
-1. 定位 jsonl 目录:`~/.claude/projects/<sanitized-cwd>/`(见 Phase 0 关于会话 jsonl 路径的说明)
-2. 列出该目录下所有 `.jsonl` 文件
-3. **粗粒度筛选**(按文件 mtime,只是性能优化):
-   - 文件 mtime ≤ INDEX.md `synced_at` → 整个文件都是旧消息,**跳过**
-   - 文件 mtime > `synced_at` 且不是当前会话本身 → 进入下一步
-4. 通过筛选的每个 jsonl 启动一个 Explore 子代理(任务模板见下文)
-5. 子代理输出按会话粒度的信号摘要,主流程汇总,进入 U.3 与 git 时间线 + 当前会话提取一起做交叉验证
+1. 完整读取 [references/session-sources.md](references/session-sources.md)。
+2. 用 `synced_at` 运行统一发现脚本，并回传上次记录的 Worktree 集合：
 
-**为什么只用 mtime 粗筛、不做消息级 timestamp 过滤?** 因为按消息时间戳硬切会破坏会话内的语义连续性(后文常引用前文的"那个 bug"、"刚才那个方案"),子代理拿到的会是半截对话,提取质量差。让子代理整段读、用 baseline 当提取边界更可靠。
+   ```bash
+   python3 <SKILL_DIR>/scripts/discover_sessions.py <ROOT> \
+     --since '<synced_at>' --baseline '<baseline_commit>' \
+     --known-worktree '<INDEX.known_worktrees 的每一项>' --pretty
+   ```
 
-**子代理任务模板:**
+   条目多时改用 `--known-worktrees-file <临时清单>`（一行一个）。**漏传等于丢掉那些 Worktree 的全部会话。**
 
-```
-完整阅读这个会话 jsonl(从头到尾,不要跳跃)。
+3. 按 `provider + session_id` 排除当前会话的落盘副本；其余每个候选会话启动一个子代理。
+4. 子代理从头到尾阅读会话以保留语义连续性，但只为消息时间 `timestamp > synced_at` 的讨论产出新信号；无可靠消息时间的来源用文件 mtime 作为保守边界并标注。
+5. 先做 scope 内容过滤，再输出统一归一化摘要；同时标明对应 Worktree 及改动状态。
+6. **`multi_branch=true` 的会话必须分段**：按 `branches` 与每条消息（Codex 按每个 resume 标记点）把信号拆到各自所属分支，逐段定性。整条会话用一个分支值定性会把大部分信号贴错标签。
+7. 主流程汇总后进入 U.3，与当前会话、当前分支 git 时间线、Worktree 时间线一起交叉验证。
 
-第一步: 判断该会话是否涉及 `<ROOT>` 内的文件
-(看消息中的 file_path、Bash cwd、文件操作等)。
-  不涉及 → 直接返回"无关",不进一步处理。
-  涉及 → 进入第二步。
+会话的分支证据是 U.3 定性的输入，不是结论：**分支名不同 ≠ 未合并**。合并状态判定链、`unmerged` 的两种相反处理（分支仍在 → 隔离；分支已删 → 采纳因果断言为已否决方案）与断言分类，全部见 [references/branch-resolution.md](references/branch-resolution.md)。当前 Worktree 的扫描分支不能替代会话历史分支。
 
-第二步: baseline 是 `synced_at` = <T1>。
-  完整理解会话上下文(包括 T1 之前的部分,作为背景)
-  但**只为 timestamp > T1 的讨论产出信号**:
-  - pitfalls 候选: bug 报告、调试中排除的错误假设、时序/并发/平台坑
-  - decisions 候选: "为什么选 A 不选 B"的讨论、被否决的方案
-  - workflows 候选: 跨文件/跨模块的操作步骤、易漏点
-  T1 之前的部分已被上次 update 处理,不重复产出。
+**为什么 mtime 只作粗筛？** 消息级硬切读取会破坏上下文；数据库 mtime 也不能代表单条会话时间。必须完整读、理解上下文，再用 `synced_at` 控制“哪些讨论产生新条目”。
 
-【隐私边界】写入信号摘要时只输出语义结论(根因、决策、陷阱),
-**不要照抄原始用户消息片段、密钥、含用户名的绝对路径**。
-条目会被 git 追踪。
+**边界情况：**
 
-按会话内的逻辑顺序读,不要按全局 timestamp 重排。
-```
-
-**边界情况:**
-- jsonl 目录不存在或为空 → 跳过 U.2.5,只用 U.2 + U.1 + U.3 走完流程
-- 会话讨论的代码已被重构掉 → 同 Phase 3.3 规则:不进 domains/shared/integrations/workflows/pitfalls,但可进 decisions 作演变记录
+- 所有来源为空 → 跳过 U.2.5，只用 U.1/U.1.5 + U.2 + U.3 继续。
+- 会话讨论的代码已重构、未合并或已回滚 → 不写成当前实现，可进入 `decisions/` 作演变记录。
+- 检测到但无法解析的来源 → 报告来源与导出建议，不得静默当成“无会话”。
 
 ### U.3 交叉验证 git ↔ 会话
 
-把 U.1 的演变摘要和 U.2 + U.2.5 的会话提取放在一起对比，捕捉以下信号：
+**第一步：定性。** 对 U.2 + U.2.5 提取出的每个信号，按 [references/branch-resolution.md](references/branch-resolution.md) 做**信号级**归属与合并状态判定——不是按整个会话定性。跨分支续写的会话必须先分段，`merged-likely` 必须走完二次验证。
+
+**第二步：按断言类型分流。** 这是整套判定的地基：
+
+| 断言类型 | 采纳规则 |
+|---|---|
+| **状态断言**（"X 已修好"、"架构是 Y"） | 必须由当前代码验证，会话说了不算 |
+| **因果断言**（"根因是 Z"、"试过 A 因 B 失败"、"选 C 不选 D"） | 代码里验证不了，随合并状态采纳 |
+
+**不要用一条规则同时处理两类。** 说"只采纳代码事实、不采纳会话断言"等于把根因分析全部丢掉——而那正是 codewise 唯一无法从 `git diff` 得到的东西。
+
+**第三步：把 U.1 的演变摘要和会话提取放在一起对比**，捕捉以下信号：
 
 - **会话讨论过 X 修复，但 git 里没动 X** → 可能是讨论但没做、在另一分支、或被回滚；追问用户
-- **git 大改了 Y，会话里没提** → Y 可能不是本次记录的产物（其他人/其他会话/未本机用过 Claude Code 的提交），不需要从会话补 pitfalls，但条目内容要据 diff 更新
+- **git 大改了 Y，会话里没提** → Y 可能来自其他人或其他机器；按 U.1 的非会话证据（完整 commit body、PR 引用、CHANGELOG）更新条目，并标记 `evidence: code-only`
 - **commit message 透露的意图与会话根因不一致** → **以会话为准**，commit message 经常省略真实原因
-- **同一根因被多个会话(U.2 + U.2.5 中的不同 jsonl)印证** → 高置信度,值得入条目;只在一处出现的可下调置信度
+- **同一根因被多个会话（不同来源/会话）印证** → 高置信度，值得入条目；只在一处出现的可下调 `confidence`
+- **会话宣称已修复，但当前代码没有** → 走 `unmerged` 分支：分支仍在则隔离；分支已删则因果断言进 `decisions/` 标为已否决方案
+- **`head_state` 显示会话记录的是同名分支上的旧提交** → 因果断言仍可采纳，但当前实现状态必须重新由当前代码验证
+- **baseline 不再是当前 HEAD 祖先** → 以 `merge-base` 结果为差量起点，并在更新报告中披露发生过 rebase/squash
 
 矛盾不必全部当场解决，但要带入 U.5——它们影响子代理的分发策略和条目内容侧重。
 
 ### U.4 影响评估
 
-基于 U.1 变更文件清单 + U.2/U.2.5 会话提取 + U.3 交叉验证，读取 `<ROOT>/docs/knowledge/INDEX.md` 和相关条目，判断：
+基于 U.1 变更文件清单 + U.2/U.2.5 会话提取 + U.3 交叉验证，读取 `<KBR>/INDEX.md` 和相关条目，判断：
 - 哪些现有条目需要更新？（变更文件命中条目的"关键文件"列表）
 - 是否需要新增条目？（出现新功能域、新依赖、新 workflow）
 - 是否有条目应该删除？（对应模块整体被移除）
@@ -980,7 +591,7 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
 变更文件清单里的 `.md` 文件单独识别处理(不走 U.5 子代理流程):
 
 ```
-变更文件清单中提取所有 .md 路径,排除 docs/knowledge/** 内的:
+变更文件清单中提取所有 .md 路径(知识库已不在工作树内,无需排除):
   · README.md / CLAUDE.md / AGENTS.md / CONTRIBUTING.md / CHANGELOG.md
   · docs/**.md / doc/**.md / design/**.md / specs/**.md / architecture/**.md
 
@@ -1007,7 +618,7 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
 
 ### U.5 执行更新（子代理分发完整 diff）
 
-**核心原则：主流程不读完整 diff。** 按 U.1 的"变更文件分组"为每组启动一个 Explore 子代理，子代理读自己负责文件的完整 diff，主流程只汇总。这样每一行 diff 都被读到，且不会爆主 context。
+**核心原则：主流程不读完整 diff。** 按 U.1 的“变更文件分组”为每组启动一个子代理，子代理读自己负责文件的完整 diff，主流程只汇总。这样每一行 diff 都被读到，且不会挤爆主上下文。
 
 每个子代理的任务模板：
 
@@ -1018,7 +629,7 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
 任务：
 1. 读取这些文件当前的完整内容（`<ROOT>` 内的实际代码）
 2. 读取这些文件从 baseline 到 HEAD 的完整 diff：
-   git diff <baseline_commit>..HEAD -- [文件清单]
+   git diff <comparison_base>..HEAD -- [文件清单]
 3. 对照主流程指出的可能受影响条目，决定：
    - 哪些条目需要更新（架构、关键文件、流程描述）
    - 是否需要新增条目
@@ -1042,8 +653,9 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
 1. 更新受影响的条目文件
 2. 更新 INDEX.md(新增/删除条目)
 3. 检查互链完整性(同 Phase 5)
-4. 确认 `<ROOT>/CLAUDE.md` 中的知识库指引仍然存在
-5. **最后**才更新 INDEX.md 元信息区:`baseline_commit` 改为当前 `git rev-parse HEAD`、`synced_at` 改为当前完整 ISO 8601 时间戳
+4. 确认 `<ROOT>/AGENTS.md` 与 `<ROOT>/CLAUDE.md` 中的知识库指引仍然存在
+5. **最后**才更新 INDEX.md 元信息区：`baseline_commit` 改为当前 `git rev-parse HEAD`，`synced_at` 改为当前完整 ISO 8601 时间戳，并刷新 `session_sources`、`worktree_count` 与 `known_worktrees`（后者原样写入发现脚本输出的 `project.known_worktrees`，只增不减）
+6. 提交知识库仓库并推送本地镜像（见 [references/storage-layout.md](references/storage-layout.md)）；GitHub 推送失败只报告，不阻塞
 
 **为什么要这个顺序?** 如果中途崩了,baseline 没更新,下次 update 仍然从旧 baseline 算 diff——会重复处理这次没改完的部分,但不会丢东西。**重跑是安全的**。
 
@@ -1055,7 +667,18 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
   · 旧 baseline: <8 位短码>(synced_at: <旧时间>)
   · 新 baseline: <8 位短码>(synced_at: <新时间>)
   · 下次 update 将从 <新 baseline 短码> 开始计算 diff
+  · 会话来源: <provider:数量 ...>；跨分支会话 <N> 条已分段归属
+  · 知识库仓库: 本地镜像已更新；远端 <已同步 | 未同步，N 个 commit 待推送>
+
+  ⚠ 只有代码证据、根因缺失（evidence: code-only）:
+    · <模块/条目> — 改动来自 <commit 短码/作者>，本机无对应会话
+    → 这些条目只能描述"改了什么"，"为什么"需要向对应作者确认
+
+  ⚠ 待确认（confidence: medium）:
+    · <条目> — <为何未达 confirmed，一句话>
 ```
+
+**`code-only` 清单必须单独列出来，不能混在正常条目变更里。** 静默降级会让人以为知识库覆盖完整——而实际上那部分只有"改了什么"，没有"为什么"，恰恰缺了知识库最有价值的部分。没有这类条目时整段省略。
 
 让用户清楚下次的起点在哪,而不是看着 INDEX.md 末尾的元信息自己猜。
 
@@ -1077,7 +700,7 @@ git diff <baseline_commit>..HEAD --name-only -- <ROOT>
 - 你新加了一个 Tauri command → `refresh-interfaces` 立即让接口速查表包含
 - 你只想看导航区长什么样,不想跑完整 update
 
-**前置条件**:`<ROOT>/docs/knowledge/INDEX.md` 已存在(否则走首次生成,不是 refresh)。
+**前置条件**:`<KBR>/INDEX.md` 已存在(否则走首次生成,不是 refresh)。
 
 ### Phase R 流程
 
@@ -1111,146 +734,29 @@ R.4 报告
 
 ---
 
-## 条目模板
+## Phase M：并入分支知识库
 
-### domains/（功能域）
+长功能分支的代码合并回主线后，把它的知识也并进来。**完整读取 [references/merge-protocol.md](references/merge-protocol.md) 再执行。**
 
-```markdown
-# [功能名称]
+**这不是 rebuild。** 分支通常只改动一小部分模块，其余条目两边完全相同——用 `_meta.json` 里记录的 `forked_from` 作 base 做三方合并，AI 只需要处理真冲突的那几条。
 
-[一句话描述这个功能域做什么]
+流程骨架：
 
-## 架构
+1. 确认 `branches/<slug>/` 存在，读 `_meta.json` 拿到原始分支名与 `forked_from`
+2. 确认代码侧已合并（`git merge-base --is-ancestor <branch> HEAD`）；未合并则停下询问——知识不该超前于代码
+3. 对分支目录里的每个文件做条目级三方合并；`_deleted` 清单按删除理由分别处理
+4. 跨路径语义去重（只扫本次新引入的条目，粗筛后再判断，**判定重复也不自动合并**）
+5. 重建 `main/INDEX.md`，检查互链完整性
+6. `branches/<slug>/` 移入 `archive/`；分支是废弃而非合并的，其因果断言先按 `unmerged` + 分支已删规则进 `main/decisions/` 标 `rejected`
+7. 提交知识库仓库并推送本地镜像
 
-[文本/ASCII 架构图，展示核心组件和数据流]
-
-## 关键文件
-
-| 文件 | 职责 |
-|------|------|
-| `路径/文件名` | 一句话 |
-
-## 核心流程
-
-[描述主要的数据流或执行流程]
-
-## 关联条目
-
-- [条目名](../分类/文件名.md) — 关联原因
-```
-
-### shared/（公共模块）
-
-```markdown
-# [模块名称]
-
-[一句话描述]
-
-## 核心类型/接口
-
-[列出关键的类型定义、函数签名、使用方式]
-
-## 使用方
-
-[谁在用这个模块，怎么用]
-
-## 关联条目
-
-- [条目名](../分类/文件名.md) — 关联原因
-```
-
-### decisions/（设计决策）
-
-```markdown
-# [决策标题]
-
-[一句话描述这个决策]
-
-## 背景
-
-[什么问题触发了这个决策？]
-
-## 方案对比
-
-| | 方案 A | 方案 B |
-|---|---|---|
-| 优势 | ... | ... |
-| 劣势 | ... | ... |
-
-## 最终选择
-
-[选了什么，为什么]
-
-## 关联条目
-
-- [条目名](../分类/文件名.md) — 关联原因
-```
-
-### integrations/（外部集成）
-
-```markdown
-# [依赖/服务名称]
-
-[一句话描述为什么用它]
-
-## 选型原因
-
-[为什么选这个而不是替代品]
-
-## 使用方式
-
-[怎么集成的，关键配置]
-
-## 限制与注意
-
-[已知限制、版本要求、许可证等]
-
-## 关联条目
-
-- [条目名](../分类/文件名.md) — 关联原因
-```
-
-### workflows/（工作流）
-
-```markdown
-# [流程名称]
-
-[一句话描述这个流程的目的]
-
-## 步骤
-
-1. [步骤描述]（涉及文件：`路径`）
-2. ...
-
-## 注意事项
-
-[容易遗漏的点]
-
-## 关联条目
-
-- [条目名](../分类/文件名.md) — 关联原因
-```
-
-### pitfalls/（踩坑记录）
-
-```markdown
-# [陷阱主题]
-
-## [具体陷阱名称]
-
-**What**: [发生了什么]
-**Why**: [为什么会这样]
-**Action**: [怎么避免/解决]
-
-[按主题分组，每个陷阱用三段式]
-
-## 关联条目
-
-- [条目名](../分类/文件名.md) — 关联原因
-```
+**因果类条目（`pitfalls`/`decisions`）的合并语义是并集**——一个坑不会因为另一条分支没记录就不成立。只有状态类条目才可能真冲突，且以合并后的当前代码裁决。
 
 ---
 
+## 条目模板
+
+六类条目（`domains/`、`shared/`、`decisions/`、`integrations/`、`workflows/`、`pitfalls/`）的完整结构模板见 [references/entry-templates.md](references/entry-templates.md)，生成条目前完整读取。
 ## 质量标准
 
 - **条目独立可读**：不依赖其他条目也能理解
