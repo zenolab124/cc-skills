@@ -86,7 +86,7 @@ class DiscoveryTests(unittest.TestCase):
         if branch or commit:
             payload["git"] = {key: value for key, value in (("branch", branch), ("commit_hash", commit)) if value}
         write_jsonl(
-            self.codex_home / "sessions" / "2026" / "08" / "05" / f"rollout-{session_id}.jsonl",
+            self.codex_path(session_id),
             [
                 {
                     "type": "session_meta",
@@ -95,6 +95,9 @@ class DiscoveryTests(unittest.TestCase):
                 }
             ],
         )
+
+    def codex_path(self, session_id: str) -> Path:
+        return self.codex_home / "sessions" / "2026" / "08" / "05" / f"rollout-{session_id}.jsonl"
 
     def add_gemini(self, cwd: Path, session_id: str) -> None:
         digest = discover_sessions.gemini_hash(cwd)
@@ -119,6 +122,37 @@ class DiscoveryTests(unittest.TestCase):
         canonical_worktree = str(self.worktree.resolve())
         worktree_sessions = [item for item in result["sessions"] if item["cwd"] == canonical_worktree]
         self.assertEqual({item["provider"] for item in worktree_sessions}, {"claude", "codex", "gemini"})
+
+    def test_git_paths_with_trailing_space_and_newline_are_preserved(self) -> None:
+        trailing_repo = Path(self.temp.name) / "trailing-repo "
+        trailing_repo.mkdir()
+        run("git", "-C", str(trailing_repo), "init", "-q")
+        run("git", "-C", str(trailing_repo), "config", "user.email", "test@example.invalid")
+        run("git", "-C", str(trailing_repo), "config", "user.name", "Codewise Test")
+        (trailing_repo / "x").write_text("x\n", encoding="utf-8")
+        run("git", "-C", str(trailing_repo), "add", "x")
+        run("git", "-C", str(trailing_repo), "commit", "-qm", "x")
+
+        context, warnings = discover_sessions.project_context(trailing_repo)
+        self.assertEqual(context["repo_root"], str(trailing_repo.resolve()))
+        self.assertEqual(warnings, [])
+
+        newline_worktree = Path(self.temp.name) / "feature\nworktree"
+        run(
+            "git",
+            "-C",
+            str(self.repo),
+            "worktree",
+            "add",
+            "-qb",
+            "feature-newline",
+            str(newline_worktree),
+        )
+        context, warnings = discover_sessions.project_context(newline_worktree)
+        roots = {item["root"] for item in context["worktrees"]}
+        self.assertIn(str(newline_worktree.resolve()), roots)
+        self.assertIsNotNone(discover_sessions.match_cwd(str(newline_worktree), context))
+        self.assertEqual(warnings, [])
 
     def test_subproject_marks_repo_root_session_for_content_check(self) -> None:
         scope = self.repo / "apps" / "web"
@@ -201,6 +235,338 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(item["head_state"], "session-head-matches-scan")
         self.assertEqual(item["branch_state"], "session-branch-differs-from-scan")
 
+    def test_codex_late_session_meta_cwd_enters_project_after_prefix_limit(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        records = [
+            {
+                "type": "session_meta",
+                "payload": {"id": "late-enter", "cwd": str(outside), "source": "cli"},
+            }
+        ]
+        records.extend({"type": "event_msg", "payload": {"type": "token_count"}} for _ in range(40))
+        records.append(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "late-enter",
+                    "cwd": str(self.worktree),
+                    "git": {"branch": "feature"},
+                },
+            }
+        )
+        write_jsonl(self.codex_path("late-enter"), records)
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        item = result["sessions"][0]
+        self.assertEqual(item["session_id"], "late-enter")
+        self.assertEqual(item["cwd"], str(discover_sessions.lexical_path(self.worktree)))
+        self.assertEqual(item["scan_branch"], "feature")
+        self.assertEqual(item["match_source"], "session-meta-cwd")
+
+    def test_codex_turn_context_cwd_enters_project(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        write_jsonl(
+            self.codex_path("turn-context"),
+            [
+                {"type": "session_meta", "payload": {"id": "turn-context", "cwd": str(outside)}},
+                {"type": "turn_context", "payload": {"cwd": str(self.worktree)}},
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        item = result["sessions"][0]
+        self.assertEqual(item["match_source"], "turn-context-cwd")
+        self.assertEqual(item["worktree_root"], str(discover_sessions.lexical_path(self.worktree)))
+
+    def test_codex_tool_workdir_is_content_candidate(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        tool_input = (
+            'const r = await tools.exec_command({cmd: "git status", '
+            f'workdir: {json.dumps(str(self.worktree))}}}); text(r.output);'
+        )
+        write_jsonl(
+            self.codex_path("tool-workdir"),
+            [
+                {"type": "session_meta", "payload": {"id": "tool-workdir", "cwd": str(outside)}},
+                {
+                    "type": "response_item",
+                    "payload": {"type": "custom_tool_call", "name": "exec", "input": tool_input},
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        item = result["sessions"][0]
+        self.assertEqual(item["match_source"], "tool-workdir")
+        self.assertTrue(item["needs_content_check"])
+
+    def test_codex_relative_tool_workdir_resolves_from_session_cwd(self) -> None:
+        parent = self.repo.parent
+        tool_input = json.dumps({"cmd": "git status", "workdir": self.repo.name})
+        write_jsonl(
+            self.codex_path("relative-workdir"),
+            [
+                {"type": "session_meta", "payload": {"id": "relative-workdir", "cwd": str(parent)}},
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": tool_input,
+                    },
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        item = result["sessions"][0]
+        self.assertEqual(item["match_source"], "tool-workdir")
+        self.assertEqual(item["cwd"], str(discover_sessions.lexical_path(self.repo)))
+
+    def test_codex_git_dash_c_path_is_content_candidate(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        write_jsonl(
+            self.codex_path("git-dash-c"),
+            [
+                {"type": "session_meta", "payload": {"id": "git-dash-c", "cwd": str(outside)}},
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps(
+                            {"cmd": f"git -C {self.worktree} status", "workdir": str(outside)}
+                        ),
+                    },
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        item = result["sessions"][0]
+        self.assertEqual(item["match_source"], "tool-command-path")
+        self.assertTrue(item["needs_content_check"])
+
+    def test_codex_cd_path_is_content_candidate(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        tool_input = (
+            "const r = await tools.exec_command({"
+            f"cmd: {json.dumps(f'cd {self.repo} && git status')}, "
+            f"workdir: {json.dumps(str(outside))}}}); text(r.output);"
+        )
+        write_jsonl(
+            self.codex_path("shell-cd"),
+            [
+                {"type": "session_meta", "payload": {"id": "shell-cd", "cwd": str(outside)}},
+                {
+                    "type": "response_item",
+                    "payload": {"type": "custom_tool_call", "name": "exec", "input": tool_input},
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        self.assertEqual(result["sessions"][0]["match_source"], "tool-command-path")
+
+    def test_codex_apply_patch_absolute_path_is_content_candidate(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        patch = f"*** Begin Patch\n*** Update File: {self.repo / 'README.md'}\n*** End Patch"
+        tool_input = f"const r = await tools.apply_patch({json.dumps(patch)}); text(r);"
+        write_jsonl(
+            self.codex_path("tool-patch"),
+            [
+                {"type": "session_meta", "payload": {"id": "tool-patch", "cwd": str(outside)}},
+                {
+                    "type": "response_item",
+                    "payload": {"type": "custom_tool_call", "name": "exec", "input": tool_input},
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        item = result["sessions"][0]
+        self.assertEqual(item["match_source"], "tool-path")
+        self.assertTrue(item["needs_content_check"])
+
+    def test_codex_message_path_mention_is_not_candidate(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        write_jsonl(
+            self.codex_path("message-only"),
+            [
+                {"type": "session_meta", "payload": {"id": "message-only", "cwd": str(outside)}},
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": f"look at {self.repo / 'README.md'}"},
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        self.assertEqual(result["session_count"], 0)
+
+    def test_codex_sibling_prefix_is_not_candidate(self) -> None:
+        sibling = Path(f"{self.repo}-copy")
+        tool_input = (
+            'const r = await tools.exec_command({cmd: "git status", '
+            f'workdir: {json.dumps(str(sibling))}}}); text(r.output);'
+        )
+        write_jsonl(
+            self.codex_path("sibling"),
+            [
+                {"type": "session_meta", "payload": {"id": "sibling", "cwd": str(sibling)}},
+                {
+                    "type": "response_item",
+                    "payload": {"type": "custom_tool_call", "name": "exec", "input": tool_input},
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        self.assertEqual(result["session_count"], 0)
+
+    def test_include_unmatched_admits_cross_machine_codex_candidate(self) -> None:
+        foreign = Path("/Users/other/project-from-another-machine")
+        self.add_codex(foreign, "foreign-codex")
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            default = discover_sessions.discover(self.repo, providers=("codex",))
+            included = discover_sessions.discover(
+                self.repo,
+                providers=("codex",),
+                include_unmatched=True,
+                since_value="2999-01-01T00:00:00Z",
+            )
+
+        self.assertEqual(default["session_count"], 0)
+        self.assertEqual(included["session_count"], 1)
+        item = included["sessions"][0]
+        self.assertEqual(item["relation"], "cross-machine-unverified")
+        self.assertTrue(item["needs_content_check"])
+
+    def test_include_unmatched_admits_cross_machine_claude_candidate(self) -> None:
+        foreign = Path("/Users/other/project-from-another-machine")
+        path = self.claude_home / "projects" / "foreign-machine-slug" / "foreign.jsonl"
+        write_jsonl(
+            path,
+            [{"type": "user", "sessionId": "foreign-claude", "cwd": str(foreign)}],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            default = discover_sessions.discover(self.repo, providers=("claude",))
+            included = discover_sessions.discover(
+                self.repo,
+                providers=("claude",),
+                include_unmatched=True,
+                since_value="2999-01-01T00:00:00Z",
+            )
+
+        self.assertEqual(default["session_count"], 0)
+        self.assertEqual(included["session_count"], 1)
+        item = included["sessions"][0]
+        self.assertEqual(item["relation"], "cross-machine-unverified")
+        self.assertTrue(item["needs_content_check"])
+
+    def test_include_unmatched_bypasses_since_even_when_synced_cwd_matches(self) -> None:
+        self.add_codex(self.repo, "synced-same-path")
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            included = discover_sessions.discover(
+                self.repo,
+                providers=("codex",),
+                include_unmatched=True,
+                since_value="2999-01-01T00:00:00Z",
+            )
+
+        self.assertEqual([item["session_id"] for item in included["sessions"]], ["synced-same-path"])
+        self.assertTrue(included["sessions"][0]["needs_content_check"])
+        self.assertEqual(
+            included["sessions"][0]["match_source"], "cross-machine-unverified"
+        )
+
+    def test_include_unmatched_same_absolute_claude_cwd_still_requires_content_check(self) -> None:
+        path = self.claude_home / "projects" / "copied-machine" / "same-path.jsonl"
+        write_jsonl(
+            path,
+            [{"type": "user", "sessionId": "same-path", "cwd": str(self.repo)}],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            included = discover_sessions.discover(
+                self.repo, providers=("claude",), include_unmatched=True
+            )
+
+        item = next(item for item in included["sessions"] if item["session_id"] == "same-path")
+        self.assertTrue(item["needs_content_check"])
+        self.assertEqual(item["match_source"], "cross-machine-unverified")
+
+    def test_codex_thread_id_marks_only_payload_id_current(self) -> None:
+        self.add_codex(self.repo, "root", parent_session_id="root")
+        self.add_codex(self.repo, "child-a", parent_session_id="root")
+        self.add_codex(self.repo, "child-b", parent_session_id="root")
+        env = {**self.env, "CODEX_THREAD_ID": "child-a"}
+
+        with mock.patch.dict(os.environ, env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        current = [item["session_id"] for item in result["sessions"] if item["is_current"]]
+        self.assertEqual(current, ["child-a"])
+
+    def test_current_codex_rollout_is_retained_without_path_evidence(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        self.add_codex(outside, "current-outside")
+        self.add_codex(outside, "other-outside")
+        env = {**self.env, "CODEX_THREAD_ID": "current-outside"}
+
+        with mock.patch.dict(os.environ, env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("codex",))
+
+        self.assertEqual([item["session_id"] for item in result["sessions"]], ["current-outside"])
+        item = result["sessions"][0]
+        self.assertTrue(item["is_current"])
+        self.assertEqual(item["relation"], "current-rollout")
+        self.assertTrue(item["needs_content_check"])
+
+    def test_current_rollout_bypasses_since_and_reports_compaction_boundary(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        write_jsonl(
+            self.codex_path("current-compacted"),
+            [
+                {"type": "session_meta", "payload": {"id": "current-compacted", "cwd": str(outside)}},
+                {"type": "event_msg", "payload": {"type": "context_compacted"}},
+                {"type": "compacted", "payload": {"window_number": 1}},
+            ],
+        )
+        env = {**self.env, "CODEX_THREAD_ID": "current-compacted"}
+
+        with mock.patch.dict(os.environ, env, clear=False):
+            result = discover_sessions.discover(
+                self.repo,
+                providers=("codex",),
+                since_value="2999-01-01T00:00:00Z",
+            )
+
+        item = result["sessions"][0]
+        self.assertEqual(item["compaction_count"], 1)
+        self.assertEqual(item["latest_compaction_line"], 3)
+
     def test_claude_branch_metadata_is_preserved(self) -> None:
         self.add_claude(self.worktree, "with-branch", branch="feature")
 
@@ -211,6 +577,55 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(item["branch"], "feature")
         self.assertEqual(item["branch_source"], "session-metadata")
         self.assertEqual(item["branch_state"], "session-branch-matches-scan")
+
+    def test_claude_late_cwd_enters_project_from_external_slug(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        path = self.claude_home / "projects" / "external-start" / "entered.jsonl"
+        write_jsonl(
+            path,
+            [
+                {"type": "user", "sessionId": "entered-late", "cwd": str(outside)},
+                {"type": "assistant", "sessionId": "entered-late", "cwd": str(self.worktree)},
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("claude",))
+
+        item = result["sessions"][0]
+        self.assertEqual(item["session_id"], "entered-late")
+        self.assertEqual(item["match_source"], "session-cwd")
+        self.assertEqual(item["worktree_root"], str(discover_sessions.lexical_path(self.worktree)))
+
+    def test_claude_bash_git_dash_c_enters_project(self) -> None:
+        outside = Path(self.temp.name) / "outside"
+        path = self.claude_home / "projects" / "external-bash" / "bash.jsonl"
+        write_jsonl(
+            path,
+            [
+                {"type": "user", "sessionId": "bash-enter", "cwd": str(outside)},
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": f"git -C {self.repo} status"},
+                            }
+                        ]
+                    },
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(self.repo, providers=("claude",))
+
+        item = result["sessions"][0]
+        self.assertEqual(item["session_id"], "bash-enter")
+        self.assertEqual(item["match_source"], "tool-command-path")
+        self.assertTrue(item["needs_content_check"])
 
     def test_other_branch_session_is_marked_as_different(self) -> None:
         self.add_claude(self.worktree, "other-branch", branch="main")
@@ -286,6 +701,41 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(recovered["branch_state"], "unknown-branch")
         # Persisted relative so no username-bearing path is ever committed.
         self.assertIn("../project-pruned", with_known["project"]["known_worktrees"])
+
+    def test_known_worktree_path_reused_by_another_repo_is_rejected(self) -> None:
+        reused = Path(self.temp.name) / "reused-worktree"
+        reused.mkdir()
+        run("git", "-C", str(reused), "init", "-q")
+        run("git", "-C", str(reused), "config", "user.email", "other@example.invalid")
+        run("git", "-C", str(reused), "config", "user.name", "Other Repo")
+        (reused / "README.md").write_text("other\n", encoding="utf-8")
+        run("git", "-C", str(reused), "add", "README.md")
+        run("git", "-C", str(reused), "commit", "-qm", "other")
+        self.add_claude(reused, "other-repo-session", branch="main")
+
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            result = discover_sessions.discover(
+                self.repo,
+                providers=("claude",),
+                known_worktrees=[str(reused)],
+            )
+
+        self.assertNotIn("other-repo-session", [item["session_id"] for item in result["sessions"]])
+        self.assertTrue(any("another repository" in warning for warning in result["warnings"]))
+
+    def test_known_worktree_path_reused_by_repo_subdirectory_is_rejected(self) -> None:
+        subdirectory = self.repo / "ordinary-subdirectory"
+        subdirectory.mkdir()
+
+        context, warnings = discover_sessions.project_context(
+            self.repo,
+            known_worktrees=[str(subdirectory)],
+        )
+
+        roots = {item["root"] for item in context["worktrees"]}
+        self.assertNotIn(str(discover_sessions.lexical_path(subdirectory)), roots)
+        self.assertNotIn("ordinary-subdirectory", context["known_worktrees"])
+        self.assertTrue(any("not a worktree root" in warning for warning in warnings))
 
     def test_known_worktrees_round_trip_as_relative_paths(self) -> None:
         # What the knowledge base stores must be accepted verbatim next run.

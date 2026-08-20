@@ -8,17 +8,20 @@ repository root may only concern a sibling subproject.
 Usage:
     python3 discover_sessions.py ROOT [--since ISO8601] [--baseline COMMIT] [--pretty]
     python3 discover_sessions.py ROOT --source 'continue=~/.continue/sessions/**/*.json'
+    python3 discover_sessions.py ROOT --include-unmatched  # synced from another machine
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -53,8 +56,8 @@ def relative_to_repo(path: Path, base_root: Path) -> str:
 
     The base must be the main worktree, not `--show-toplevel`: inside a linked
     worktree that returns the linked worktree's own root, while the knowledge
-    base lives under `git-common-dir` and is shared by every worktree.  Mixing
-    the two bases makes entries written from one tree resolve to garbage when
+    base lives under the same scope in the main worktree.  Mixing the two bases
+    makes entries written from one tree resolve to garbage when
     read back from another — both inventing ghost paths and, worse, corrupting
     real ones so their sessions become undiscoverable.
     """
@@ -79,13 +82,63 @@ def git(root: Path, *args: str) -> str | None:
         return None
 
 
+def git_path(root: Path, *args: str) -> str | None:
+    """Read one path record, removing only Git's record terminator."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.removesuffix("\n")
+
+
+def git_worktree_records(root: Path) -> list[dict[str, Any]]:
+    """Parse NUL-delimited porcelain so every legal filesystem path survives."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []
+    records: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    for field in result.stdout.split(b"\0"):
+        if not field:
+            if current.get("root"):
+                records.append(current)
+            current = {}
+            continue
+        key_raw, separator, value_raw = field.partition(b" ")
+        key = key_raw.decode("ascii", errors="strict")
+        value = os.fsdecode(value_raw) if separator else ""
+        if key == "worktree":
+            current["root"] = value
+        elif key == "HEAD":
+            current["head"] = value
+        elif key == "branch":
+            current["branch"] = value.removeprefix("refs/heads/")
+        elif key in ("detached", "bare"):
+            current[key] = True
+    if current.get("root"):
+        records.append(current)
+    return records
+
+
 def project_context(
     root: Path,
     baseline: str | None = None,
     known_worktrees: Iterable[str] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     root = lexical_path(root)
-    top_text = git(root, "rev-parse", "--show-toplevel")
+    top_text = git_path(root, "rev-parse", "--show-toplevel")
     if not top_text:
         return ({
             "root": str(root),
@@ -102,33 +155,18 @@ def project_context(
     except ValueError:
         scope_rel = Path(".")
 
-    common_text = git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common_text = git_path(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if common_text:
         common_dir = lexical_path(common_text)
     else:
-        fallback = git(root, "rev-parse", "--git-common-dir")
+        fallback = git_path(root, "rev-parse", "--git-common-dir")
         common_dir = lexical_path(repo_root / fallback) if fallback else None
 
-    worktrees: list[dict[str, Any]] = []
-    porcelain = git(root, "worktree", "list", "--porcelain") or ""
-    current: dict[str, Any] = {}
-    for line in [*porcelain.splitlines(), ""]:
-        if not line:
-            if current.get("root"):
-                wt_root = lexical_path(current["root"])
-                current["scope_root"] = str(lexical_path(wt_root / scope_rel))
-                worktrees.append(current)
-            current = {}
-            continue
-        key, _, value = line.partition(" ")
-        if key == "worktree":
-            current["root"] = value
-        elif key == "HEAD":
-            current["head"] = value
-        elif key == "branch":
-            current["branch"] = value.removeprefix("refs/heads/")
-        elif key in ("detached", "bare"):
-            current[key] = True
+    worktrees = git_worktree_records(root)
+    for worktree in worktrees:
+        wt_root = lexical_path(worktree["root"])
+        worktree["root"] = str(wt_root)
+        worktree["scope_root"] = str(lexical_path(wt_root / scope_rel))
 
     if not worktrees:
         worktrees.append(
@@ -154,6 +192,7 @@ def project_context(
     # recorded by earlier runs are re-admitted as stale candidates so their
     # sessions stay discoverable; they carry no HEAD/branch because the
     # directory may be gone, which keeps downstream checks conservative.
+    warnings: list[str] = []
     seen_roots = {lexical_path(wt["root"]) for wt in worktrees}
     for entry in known_worktrees or []:
         # Entries persisted in the knowledge base are relative to the main
@@ -162,6 +201,19 @@ def project_context(
         entry_root = lexical_path(raw if raw.is_absolute() else main_root / raw)
         if entry_root in seen_roots:
             continue
+        if entry_root.exists():
+            entry_common_text = git_path(
+                entry_root, "rev-parse", "--path-format=absolute", "--git-common-dir"
+            )
+            entry_common = lexical_path(entry_common_text) if entry_common_text else None
+            entry_top_text = git_path(entry_root, "rev-parse", "--show-toplevel")
+            entry_top = lexical_path(entry_top_text) if entry_top_text else None
+            if not common_dir or entry_common != common_dir or entry_top != entry_root:
+                warnings.append(
+                    "ignored known worktree path now owned by another repository "
+                    f"or not a worktree root: {entry_root}"
+                )
+                continue
         seen_roots.add(entry_root)
         worktrees.append(
             {
@@ -173,7 +225,6 @@ def project_context(
             }
         )
 
-    warnings: list[str] = []
     if baseline:
         # `git cat-file -e` succeeds with empty stdout, which the lightweight
         # git() helper represents as an empty string.  Resolve to a commit
@@ -393,6 +444,10 @@ def session_item(
     selector: str | None = None,
     needs_content_check: bool | None = None,
     branches: list[str] | None = None,
+    is_current: bool = False,
+    match_source: str | None = None,
+    compaction_count: int = 0,
+    latest_compaction_line: int | None = None,
 ) -> dict[str, Any]:
     stat = path.stat()
     worktree = next(
@@ -444,7 +499,12 @@ def session_item(
             if needs_content_check is not None
             else (match or {}).get("needs_content_check", True)
         ),
+        "is_current": is_current,
+        "match_source": match_source or (match or {}).get("relation", "content-candidate"),
     }
+    if provider == "codex":
+        item["compaction_count"] = compaction_count
+        item["latest_compaction_line"] = latest_compaction_line
     if selector:
         item["selector"] = selector
     return item
@@ -489,6 +549,7 @@ def discover_claude(
     context: dict[str, Any],
     since: float | None,
     include_derived: bool = False,
+    include_unmatched: bool = False,
 ) -> list[dict[str, Any]]:
     claude_default = os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")
     base = env_path("CODEWISE_CLAUDE_HOME", claude_default) / "projects"
@@ -524,6 +585,7 @@ def discover_claude(
     # Catch sessions launched from a nested directory whose slug cannot be
     # derived from ROOT.  Only the first metadata records are read.
     prefetched: dict[Path, dict[str, Any]] = {}
+    structured: dict[Path, dict[str, Any]] = {}
     for path in base.glob("*/*.jsonl"):
         if path in candidates or not after_since(path, since):
             continue
@@ -532,24 +594,65 @@ def discover_claude(
             candidates[path] = None
             prefetched[path] = metadata
 
+    # A Claude session can start in an unrelated directory and later enter the
+    # project. Its project slug and first cwd then both point outside. Scan the
+    # remaining JSONL files structurally (cwd + real tool_use only), never
+    # prose, so those sessions are still discoverable without path mentions
+    # creating false candidates.
+    for path in base.rglob("*.jsonl"):
+        if path in candidates or (not include_derived and is_derived_transcript(path, base)):
+            continue
+        if not after_since(path, since) and not include_unmatched:
+            continue
+        evidence = claude_session_evidence(path, context)
+        if evidence["match"]:
+            candidates[path] = evidence["match"]
+            prefetched[path] = evidence["metadata"]
+            structured[path] = evidence
+
+    # Session directories copied from another machine retain that machine's
+    # absolute cwd slug, which cannot match any local worktree. Admit them only
+    # behind an explicit switch so the normal scan does not expand to every
+    # Claude project on this machine.
+    if include_unmatched:
+        unmatched = {
+            "relation": "unmatched-content-candidate",
+            "needs_content_check": True,
+        }
+        for path in base.rglob("*.jsonl"):
+            if not include_derived and is_derived_transcript(path, base):
+                continue
+            candidates.setdefault(path, unmatched)
+
     sessions: list[dict[str, Any]] = []
     for path in sorted(candidates):
-        if not after_since(path, since):
+        origin = candidates[path]
+        # A newly copied cross-machine file can retain an old mtime and can
+        # even have the same absolute cwd on both machines. In this mode mtime
+        # cannot safely exclude anything; downstream message timestamps are
+        # the production boundary.
+        if not after_since(path, since) and not include_unmatched:
             continue
         metadata = prefetched.get(path) or metadata_from_jsonl(path)
         # Directory origin wins; the recorded cwd is the fallback.
-        match = candidates[path] or match_cwd(metadata.get("cwd"), context)
+        match = origin or match_cwd(metadata.get("cwd"), context)
         if not match:
             # Nested side-agent files inherit relevance from the selected
             # project directory and still require content confirmation.
             match = {"relation": "project-directory", "needs_content_check": True}
+        if include_unmatched:
+            match = {
+                **match,
+                "relation": "cross-machine-unverified",
+                "needs_content_check": True,
+            }
         sessions.append(
             session_item(
                 "claude",
                 path,
                 "claude-jsonl",
                 context,
-                cwd=metadata.get("cwd"),
+                cwd=(structured.get(path) or {}).get("cwd") or metadata.get("cwd"),
                 match=match,
                 session_id=metadata.get("sessionId") or metadata.get("session_id"),
                 branch=metadata.get("branch"),
@@ -557,12 +660,395 @@ def discover_claude(
                 # Only scanned for sessions that already passed attribution, so
                 # the full-file read stays cheap.
                 branches=branch_timeline(path),
+                match_source=(
+                    "cross-machine-unverified"
+                    if include_unmatched
+                    else (structured.get(path) or {}).get("match_source")
+                ),
             )
         )
     return sessions
 
 
-def discover_codex(context: dict[str, Any], since: float | None) -> list[dict[str, Any]]:
+TOOL_PATH_HEADER = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$",
+    re.MULTILINE,
+)
+TOOL_WORKDIR = re.compile(
+    r"(?:\"|')?(?:workdir|cwd)(?:\"|')?\s*:\s*"
+    r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')"
+)
+TOOL_COMMAND = re.compile(
+    r"(?:\"|')?(?:cmd|command)(?:\"|')?\s*:\s*"
+    r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')"
+)
+TOOL_PATCH_LITERAL = re.compile(
+    r"tools\.apply_patch\(\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')"
+)
+
+
+def _decode_quoted(value: str) -> str | None:
+    try:
+        decoded = ast.literal_eval(value)
+    except (SyntaxError, ValueError):
+        return None
+    return decoded if isinstance(decoded, str) else None
+
+
+def _tool_payload(item: dict[str, Any]) -> tuple[str | None, Any]:
+    """Return a real tool-call name and input without reading message text."""
+    if item.get("type") != "response_item":
+        return None, None
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    if payload.get("type") not in ("function_call", "custom_tool_call"):
+        return None, None
+    return payload.get("name"), payload.get("arguments", payload.get("input"))
+
+
+def _command_path_candidates(command: str) -> list[str]:
+    """Extract directory operands from real shell ``cd`` and ``git -C`` calls."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return []
+
+    candidates: list[str] = []
+    separators = {"&&", "||", ";", "|"}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        command_name = Path(token).name
+        if command_name in {"cd", "pushd"}:
+            cursor = index + 1
+            if cursor < len(tokens) and tokens[cursor] == "--":
+                cursor += 1
+            if cursor < len(tokens) and tokens[cursor] not in separators:
+                candidates.append(tokens[cursor])
+        elif command_name == "git":
+            cursor = index + 1
+            while cursor < len(tokens) and tokens[cursor] not in separators:
+                value = tokens[cursor]
+                if value == "-C" and cursor + 1 < len(tokens):
+                    candidates.append(tokens[cursor + 1])
+                    cursor += 1
+                elif value.startswith("-C") and len(value) > 2:
+                    candidates.append(value[2:])
+                cursor += 1
+        index += 1
+    return candidates
+
+
+def _match_tool_path(
+    value: str,
+    context: dict[str, Any],
+    base: str | None,
+) -> dict[str, Any] | None:
+    if not value or value == "-" or any(marker in value for marker in ("$", "`", "\x00")):
+        return None
+    candidate = Path(os.path.expanduser(value))
+    if not candidate.is_absolute():
+        if not base:
+            return None
+        candidate = lexical_path(base) / candidate
+    match = match_cwd(str(candidate), context)
+    return {**match, "needs_content_check": True} if match else None
+
+
+def _tool_evidence(
+    name: str | None,
+    raw_input: Any,
+    context: dict[str, Any],
+    fallback_cwd: str | None,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Find structured cwd/path evidence in a tool call.
+
+    Tool inputs are only candidate evidence and therefore always keep
+    ``needs_content_check`` enabled.  User/assistant text and tool output are
+    deliberately ignored so a path mention cannot create a false match.
+    """
+    if not isinstance(name, str):
+        return None, None, None
+
+    parsed: dict[str, Any] | None = None
+    text = ""
+    if isinstance(raw_input, dict):
+        parsed = raw_input
+        text = json.dumps(raw_input, ensure_ascii=False)
+    elif isinstance(raw_input, str):
+        text = raw_input
+        try:
+            candidate = json.loads(raw_input)
+            parsed = candidate if isinstance(candidate, dict) else None
+        except json.JSONDecodeError:
+            parsed = None
+    else:
+        return None, None, None
+
+    lowered = name.lower()
+    is_exec = lowered in {"exec", "exec_command", "shell", "bash"}
+    is_patch = lowered in {"apply_patch", "patch"}
+    is_path_tool = lowered in {
+        "edit",
+        "multiedit",
+        "write",
+        "read",
+        "notebookedit",
+        "notebook_edit",
+        "grep",
+        "glob",
+    }
+    if lowered == "exec":
+        # The Codex app's programmatic tool wrapper is itself named ``exec``.
+        # Only inspect it when it actually invokes a filesystem-aware tool.
+        is_exec = "tools.exec_command" in text
+        is_patch = "tools.apply_patch" in text
+    if not (is_exec or is_patch or is_path_tool):
+        return None, None, None
+
+    workdirs: list[str] = []
+    if parsed:
+        for key in ("workdir", "cwd"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                workdirs.append(value)
+    for quoted in TOOL_WORKDIR.findall(text):
+        value = _decode_quoted(quoted)
+        if value:
+            workdirs.append(value)
+
+    matched_workdir: str | None = None
+    for value in workdirs:
+        if not value or any(marker in value for marker in ("$", "`", "\x00")):
+            continue
+        candidate = Path(os.path.expanduser(value))
+        if not candidate.is_absolute():
+            if not fallback_cwd:
+                continue
+            candidate = lexical_path(fallback_cwd) / candidate
+        normalized = str(lexical_path(candidate))
+        match = match_cwd(normalized, context)
+        if match:
+            match = {**match, "needs_content_check": True}
+            return match, normalized, "tool-workdir"
+        matched_workdir = normalized
+
+    base = matched_workdir or fallback_cwd
+    commands: list[str] = []
+    if parsed:
+        commands.extend(
+            value
+            for key, value in parsed.items()
+            if key in ("cmd", "command") and isinstance(value, str)
+        )
+    for quoted in TOOL_COMMAND.findall(text):
+        value = _decode_quoted(quoted)
+        if value:
+            commands.append(value)
+    for command in commands:
+        for value in _command_path_candidates(command):
+            match = _match_tool_path(value, context, base)
+            if match:
+                return match, str(lexical_path(base)) if base else None, "tool-command-path"
+
+    if parsed and is_path_tool:
+        for key in ("file_path", "path", "notebook_path"):
+            value = parsed.get(key)
+            if not isinstance(value, str):
+                continue
+            match = _match_tool_path(value, context, base)
+            if match:
+                return match, str(lexical_path(base)) if base else None, "tool-path"
+
+    patch_texts = [text]
+    for quoted in TOOL_PATCH_LITERAL.findall(text):
+        value = _decode_quoted(quoted)
+        if value:
+            patch_texts.append(value)
+    if parsed:
+        patch_texts.extend(
+            value
+            for key, value in parsed.items()
+            if key in ("patch", "input", "diff") and isinstance(value, str)
+        )
+    for patch_text in patch_texts:
+        for groups in TOOL_PATH_HEADER.findall(patch_text):
+            value = next((part.strip() for part in groups if part.strip()), "")
+            if not value or "\x00" in value:
+                continue
+            match = _match_tool_path(value, context, base)
+            if match:
+                return match, str(lexical_path(base)) if base else None, "tool-path"
+    return None, None, None
+
+
+def claude_session_evidence(path: Path, context: dict[str, Any]) -> dict[str, Any]:
+    """Find late Claude cwd/tool attribution without consuming message prose."""
+    metadata = metadata_from_jsonl(path)
+    direct_match: dict[str, Any] | None = None
+    direct_cwd: str | None = None
+    tool_match: dict[str, Any] | None = None
+    tool_cwd: str | None = None
+    tool_source: str | None = None
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if '"cwd"' not in line and '"tool_use"' not in line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                for cwd in (item.get("cwd"), payload.get("cwd")):
+                    match = match_cwd(cwd, context)
+                    if match:
+                        direct_match = match
+                        direct_cwd = cwd
+
+                message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    match, cwd, source = _tool_evidence(
+                        block.get("name"),
+                        block.get("input"),
+                        context,
+                        direct_cwd or metadata.get("cwd"),
+                    )
+                    if match:
+                        tool_match, tool_cwd, tool_source = match, cwd, source
+    except OSError:
+        pass
+
+    return {
+        "metadata": metadata,
+        "match": direct_match or tool_match,
+        "cwd": direct_cwd if direct_match else tool_cwd,
+        "match_source": "session-cwd" if direct_match else tool_source,
+    }
+
+
+def codex_rollout_evidence(
+    path: Path,
+    context: dict[str, Any],
+    current_thread_id: str | None,
+) -> dict[str, Any]:
+    """Stream a rollout and collect attribution without consuming prose."""
+    metadata: dict[str, Any] = {}
+    direct_match: dict[str, Any] | None = None
+    direct_cwd: str | None = None
+    direct_source: str | None = None
+    tool_match: dict[str, Any] | None = None
+    tool_cwd: str | None = None
+    tool_source: str | None = None
+    compaction_lines: list[int] = []
+    compaction_fallback_lines: list[int] = []
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                # Keep this scan structural.  Prose, reasoning, and tool output
+                # are neither parsed nor considered attribution evidence.
+                if not any(
+                    marker in line
+                    for marker in (
+                        '"session_meta"',
+                        '"turn_context"',
+                        '"function_call"',
+                        '"custom_tool_call"',
+                        '"compacted"',
+                        '"context_compacted"',
+                    )
+                ):
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                record_type = item.get("type")
+
+                if record_type == "session_meta":
+                    metadata.setdefault("id", payload.get("id"))
+                    metadata.setdefault("session_id", payload.get("session_id") or payload.get("id"))
+                    metadata.setdefault("cwd", payload.get("cwd"))
+                    metadata.setdefault("originator", payload.get("originator"))
+                    metadata.setdefault("source", payload.get("source"))
+                    git_payload = payload.get("git") if isinstance(payload.get("git"), dict) else {}
+                    if git_payload.get("branch") and not metadata.get("branch"):
+                        metadata["branch"] = git_payload["branch"]
+                    if git_payload.get("commit_hash") and not metadata.get("commit_hash"):
+                        metadata["commit_hash"] = git_payload["commit_hash"]
+                    cwd = payload.get("cwd")
+                    match = match_cwd(cwd, context)
+                    if match:
+                        direct_match = match
+                        direct_cwd = cwd
+                        direct_source = "session-meta-cwd"
+                elif record_type == "turn_context":
+                    cwd = payload.get("cwd")
+                    match = match_cwd(cwd, context)
+                    if match:
+                        direct_match = match
+                        direct_cwd = cwd
+                        direct_source = "turn-context-cwd"
+
+                name, raw_input = _tool_payload(item)
+                if name:
+                    match, cwd, source = _tool_evidence(
+                        name,
+                        raw_input,
+                        context,
+                        direct_cwd or metadata.get("cwd"),
+                    )
+                    if match:
+                        tool_match, tool_cwd, tool_source = match, cwd, source
+
+                if record_type == "compacted":
+                    compaction_lines.append(line_number)
+                elif record_type == "event_msg" and payload.get("type") == "context_compacted":
+                    compaction_fallback_lines.append(line_number)
+    except OSError:
+        pass
+
+    match = direct_match or tool_match
+    matched_cwd = direct_cwd if direct_match else tool_cwd
+    match_source = direct_source if direct_match else tool_source
+    is_current = bool(current_thread_id and metadata.get("id") == current_thread_id)
+    if is_current and not match:
+        match = {"relation": "current-rollout", "needs_content_check": True}
+        match_source = "current-thread-id"
+    boundary = (
+        compaction_lines[-1]
+        if compaction_lines
+        else compaction_fallback_lines[-1]
+        if compaction_fallback_lines
+        else None
+    )
+    return {
+        "metadata": metadata,
+        "match": match,
+        "cwd": matched_cwd or metadata.get("cwd"),
+        "match_source": match_source,
+        "is_current": is_current,
+        "compaction_count": len(compaction_lines) or len(compaction_fallback_lines),
+        "latest_compaction_line": boundary,
+    }
+
+
+def discover_codex(
+    context: dict[str, Any],
+    since: float | None,
+    include_unmatched: bool = False,
+) -> list[dict[str, Any]]:
     codex_default = os.environ.get("CODEX_HOME", "~/.codex")
     home = env_path("CODEWISE_CODEX_HOME", codex_default)
     files: set[Path] = set()
@@ -572,20 +1058,37 @@ def discover_codex(context: dict[str, Any], since: float | None) -> list[dict[st
             files.update(base.rglob("*.jsonl"))
 
     sessions: list[dict[str, Any]] = []
+    current_thread_id = os.environ.get("CODEX_THREAD_ID")
     for path in sorted(files):
-        if not after_since(path, since):
+        current_filename = bool(current_thread_id and current_thread_id in path.name)
+        is_recent = after_since(path, since)
+        if not is_recent and not current_filename and not include_unmatched:
             continue
-        metadata = metadata_from_jsonl(path, max_lines=32)
-        match = match_cwd(metadata.get("cwd"), context)
+        evidence = codex_rollout_evidence(path, context, current_thread_id)
+        metadata = evidence["metadata"]
+        if not is_recent and not evidence["is_current"] and not include_unmatched:
+            continue
+        match = evidence["match"]
         if not match:
-            continue
+            if not include_unmatched:
+                continue
+            match = {
+                "relation": "unmatched-content-candidate",
+                "needs_content_check": True,
+            }
+        if include_unmatched:
+            match = {
+                **match,
+                "relation": "cross-machine-unverified",
+                "needs_content_check": True,
+            }
         sessions.append(
             session_item(
                 "codex",
                 path,
                 "codex-rollout-jsonl",
                 context,
-                cwd=metadata.get("cwd"),
+                cwd=evidence["cwd"],
                 match=match,
                 # payload.id identifies this rollout/thread. payload.session_id
                 # can point at the root thread and is shared by child agents.
@@ -600,6 +1103,14 @@ def discover_codex(context: dict[str, Any], since: float | None) -> list[dict[st
                 # Codex records git provenance at each start/resume, so this
                 # marks resume points rather than every turn.
                 branches=branch_timeline(path),
+                is_current=evidence["is_current"],
+                match_source=(
+                    "cross-machine-unverified"
+                    if include_unmatched
+                    else evidence["match_source"]
+                ),
+                compaction_count=evidence["compaction_count"],
+                latest_compaction_line=evidence["latest_compaction_line"],
             )
         )
     return sessions
@@ -919,6 +1430,7 @@ def discover(
     custom_sources: list[str] | None = None,
     known_worktrees: Iterable[str] | None = None,
     include_derived: bool = False,
+    include_unmatched: bool = False,
 ) -> dict[str, Any]:
     since = parse_since(since_value)
     context, context_warnings = project_context(root, baseline_value, known_worktrees)
@@ -938,7 +1450,16 @@ def discover(
         if provider not in provider_set:
             continue
         if provider == "claude":
-            sessions.extend(discover_claude(context, since, include_derived))
+            sessions.extend(
+                discover_claude(
+                    context,
+                    since,
+                    include_derived=include_derived,
+                    include_unmatched=include_unmatched,
+                )
+            )
+        elif provider == "codex":
+            sessions.extend(discover_codex(context, since, include_unmatched))
         else:
             sessions.extend(discoverers[provider](context, since))
 
@@ -953,10 +1474,11 @@ def discover(
         counts[item["provider"]] = counts.get(item["provider"], 0) + 1
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "since": since_value,
         "baseline": baseline_value,
+        "include_unmatched": include_unmatched,
         "project": context,
         "scanned_providers": [provider for provider in BUILTIN_PROVIDERS if provider in provider_set],
         "providers": counts,
@@ -1005,6 +1527,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also list workflow-produced records (wf_*/agent-*.jsonl, journal.jsonl); "
              "excluded by default because a subagent's findings already reach its parent session",
     )
+    parser.add_argument(
+        "--include-unmatched",
+        action="store_true",
+        help="Also list Claude/Codex sessions whose paths do not match a local Worktree; "
+             "use for cross-machine copies and content-check every result",
+    )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     return parser
 
@@ -1036,6 +1564,7 @@ def main() -> int:
             custom_sources=args.source,
             known_worktrees=read_known_worktrees(args),
             include_derived=args.include_derived,
+            include_unmatched=args.include_unmatched,
         )
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))

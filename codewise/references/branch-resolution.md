@@ -11,9 +11,9 @@
 5. 断言分类
 6. 与 U.3 的衔接
 
-## 归属分支推导
+## 写入归属判定
 
-Worktree 的临时分支未必从主线分出，也未必合回主线——它可以从一个长功能分支分出、再合回那个分支。因此归属判据不是"最终合进哪里"，而是**最近的、已有知识库目录的祖先分支**。
+Worktree 的临时分支未必从主线分出，也未必合回主线。Git 拓扑只能给出候选，不能可靠区分 sibling branch，所以**已确认的分支登记表是写入归属的唯一权威源**。
 
 ⚠️ **主线分支名不是 `main`，要从元信息读。** 主线知识库就在 `<KB>` 根（没有 `main/` 子目录），而仓库的主线**分支**可能叫 `master`、`trunk` 或任何名字。首次生成时探测当前分支并写入 `<KB>/_meta.json`：
 
@@ -21,43 +21,78 @@ Worktree 的临时分支未必从主线分出，也未必合回主线——它�
 { "anchor_kind": "main", "branch": "<首次生成时的当前分支名>" }
 ```
 
-之后推导时，候选集 = `<KB>/_meta.json` 的 `branch`（主线）+ 各 `<KB>/.branches/<slug>/_meta.json` 的 `branch`。**任何地方都不要把字符串 `"main"` 当分支名用**——那会在 `master` 仓库上静默失配，退化成"所有分支都算不出归属"。
+`<KB>/_branches.json` 按原始分支名登记：
+
+```json
+{
+  "feat/short": {
+    "mode": "inherit",
+    "parent_anchor": "master",
+    "confirmed_at": "2026-08-13T10:00:00+08:00"
+  },
+  "feat/long": {
+    "mode": "independent",
+    "parent_anchor": "master",
+    "slug": "feat-long",
+    "confirmed_at": "2026-08-13T10:05:00+08:00"
+  }
+}
+```
+
+判定顺序：
+
+1. detached HEAD → 只读，不写。
+2. 当前分支等于 `<KB>/_meta.json.branch` → `<KBR>=<KB>`，允许写。
+3. 登记为 `independent` → `<KBR>=<KB>/.branches/<slug>`，允许写；校验目录 `_meta.json.branch` 与原始分支一致。
+4. 登记为 `inherit` → 读取 `parent_anchor` 的知识库，但 `write_allowed=false`。短期分支的知识由父分支后续 update 从会话打捞，不能把未合并事实直接写进父目录。
+5. 登记为 `archived` → 历史目录只读；当前同名分支视为可能被复用，展示旧 archive 信息并要求重新确认，确认前不得写。重新登记时先把旧项的 `slug/archive_path/archived_at/outcome` 原样迁入该 branch 的 `archive_history[]`，再把顶层改为新的 `inherit` 或 `independent` 状态；旧 archive 目录仍保留并继续校验，不能覆盖或丢元数据。
+6. 未登记的非主线分支 → 只计算候选并询问一次；确认前只读，不得写。
+
+**任何地方都不要把字符串 `"main"` 当分支名用。**
+
+### 未登记分支的候选提示
+
+写入父锚点只允许主线 `_meta.json.branch`。独立分支可以作为拓扑背景显示，但不能成为另一独立分支的 `parent_anchor`；否则需要链式知识合并，而本协议只定义“独立分支 → 主线”的一次合并。优先判断主线 tip 是否为 HEAD 祖先并报告距 HEAD 的提交数；不是祖先时可展示共同祖先，但必须明确它可能是 sibling，不能自动采用。
 
 ```bash
-current=$(git branch --show-current)          # detached 时见下方边界
-# 候选来自各 _meta.json 记录的原始分支名，不是目录名
+current=$(git branch --show-current)
+# cand 只取主线 _meta.json 记录的原始分支名，不是目录名
 for cand in "${candidates[@]}"; do
-  base=$(git merge-base "$cand" HEAD) || continue
-  # 距离 = 从 HEAD 回溯到 merge-base 的提交数，越小越近
-  git rev-list --count "$base"..HEAD
+  if git merge-base --is-ancestor "$cand" HEAD; then
+    git rev-list --count "$cand"..HEAD
+  else
+    base=$(git merge-base "$cand" HEAD) || continue
+    echo "$cand 仅共享共同祖先 $base，不是 HEAD 的祖先"
+  fi
 done
 ```
 
-取 `rev-list --count` 最小的候选作为归属。规则：
-
-- 当前分支自己有目录 → `<KBR>` = 该目录，不再推导。
-- 没有自己的目录 → 归属推导出的最近祖先；若最近祖先是主线分支，`<KBR>` = `<KB>` 本身。
-- **主线分支已被改名或删除**（`_meta.json` 记的分支不存在）→ 报告并询问，不要猜；确认后更新 `<KB>/_meta.json` 的 `branch`。
-- 所有候选都算不出 `merge-base`（完全无关的历史）→ 报告无法确定归属并停止，不要默认写主线。
-- **detached HEAD** → 没有分支名可归属，只做只读分析，不写任何条目；报告原因。
+主线分支已改名/删除、所有候选历史无关，或登记表与目录 `_meta.json` 冲突时，停止并询问，不要猜。
 
 fallback 读取时（当前分支没有独立目录，读的是主线那份）必须**明确标注"这是主线知识库，不含本分支改动"**。让 AI 知道自己读的是主线视角，比让它以为读到了当前分支的知识安全得多。
 
 ## 首次运行的确认交互
 
-首次在某个非主线分支上运行时，展示推导结果并询问一次：
+首次在某个未登记非主线分支上运行时，展示候选和证据并询问一次：
 
 ```
 当前分支 feat/big-sub 没有独立知识库。
-推导归属：.branches/feat-big/（最近祖先 feat/big，merge-base 距 HEAD 3 个 commit）
-要为 feat/big-sub 建独立目录吗？[否 / 是]
+候选父锚点：trunk（它是 HEAD 的祖先，距 HEAD 3 个 commit）
+选择：[继承并保持只读 / 建独立目录 / 取消]
 ```
 
-**把推导结果摆出来让用户确认，不要问"这个分支算长期吗"这种抽象问题。** 选择记入 `<KB>/_branches.json`（分支登记表），之后同一分支不再询问。
+**把证据摆出来让用户确认，不要自动采用“距离最小”。** 选择记入 `_branches.json`，之后同一分支不再询问；已归档的同名分支例外，必须显式确认这是继续旧工作还是 Git 名称复用，不能悄悄复活旧 KBR。`archive_history` 是 append-only；新 active slug 的唯一性只与其他 active independent 比较，但所有历史 `archive_path` 在整个 registry 中仍须全局唯一。
 
 判据本身很实用：短期实验分支（存活几小时、跑完即合）选"否"，知识靠会话打捞在归属分支的 update 里消化；长功能分支选"是"，产出直接落在自己的目录里。**在短期 Worktree 里跑 codewise 本就罕见**——几小时的工作不会中途停下来生成知识库，所以这个交互极少触发。
 
-建了独立目录时，目录内 `_meta.json` 必须记录原始分支名与 `forked_from`（当时知识库仓库的 HEAD）——后者是三方合并取 base 的唯一依据。
+建独立目录时必须在 KB 锁内一次完成：
+
+1. 记录当前知识库 HEAD 为 `_meta.json.forked_from`，并记录原始分支名；
+2. 把主线 `INDEX.md` 与六类条目完整复制为自包含快照，控制文件不复制；
+3. `_sync.json.baseline_commit` 取已确认 `parent_anchor` 与当前代码 HEAD 的 `merge-base`，无法解析则置 `null`；`synced_at` 置 `null`，确保首次分支 update 不漏旧会话；
+4. 随即按 Phase U 更新该快照。不要因为新目录最初没有 INDEX 而转入 Phase G 再生成一份不同结构。
+
+这保证分支 INDEX 的相对链接可解析，Phase M 也能以 `forked_from` 做真正的条目级三方比较。
 
 ## 分段归属协议
 
@@ -83,9 +118,11 @@ Codex 的段内如果用户在别的终端切了分支，不会有记录——**
 
 1. 会话分支仍存在，且 `git merge-base --is-ancestor <branch> HEAD` 成立
 2. merge commit 的 message 明确提到该分支名
-3. **会话里记录的 commit hash 出现在 `baseline..HEAD` 的历史中**
+3. **会话里记录的 commit hash 经验证后是当前 HEAD 的祖先**
 
-第 3 条最硬：Codex 会话有 `payload.git.commit_hash`（实测约 87% 覆盖），Claude Code 没有对应字段，需从 transcript 里的 commit 操作反推。**来源之间证据强度不对称，不要假设一视同仁。**
+第 3 条最硬，也不依赖 baseline：先把会话 hash 限定为完整 40/64 位十六进制，再用 `git rev-parse --verify --end-of-options '<hash>^{commit}'` 取得规范 full hash，最后检查它是否为 HEAD 祖先。`baseline..HEAD` 只限定本轮新增扫描，不限定“是否已经合并”；首次生成没有 baseline、已早于 baseline 的旧会话也能因此确认。Codex 会话有 `payload.git.commit_hash`（实测约 87% 覆盖），Claude Code 没有对应字段，需从 transcript 里的 commit 操作反推。**来源之间证据强度不对称，不要假设一视同仁。**
+
+所有来自 transcript/JSON 的分支名在进入 Git 前先通过 `git check-ref-format --branch`，并只解析精确 `refs/heads/<branch>`；随后命令只消费已解析 full hash。校验失败就是未知证据，不得把原字符串当 revspec/option 继续执行。
 
 ### merged-likely（仅文件级命中，必须二次验证）
 

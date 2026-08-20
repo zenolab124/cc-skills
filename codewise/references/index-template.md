@@ -3,6 +3,12 @@
 Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KBR>/_sync.json`，不写进 INDEX.md**——见 [storage-layout.md](storage-layout.md)。
 空分类不出现在 INDEX.md 中。
 
+## 目录
+
+1. 引用写法
+2. INDEX 主模板
+3. Agent 注册模板
+
 ## 引用写法（两类，规则不同）
 
 | 引用类型 | 写法 | 为什么 |
@@ -15,7 +21,7 @@ Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KBR>/_sync
 「项目文档导航」区顶部必须写一行锚点说明：
 
 ```markdown
-> 以下路径相对项目根（`git rev-parse --show-toplevel`）
+> 以下路径相对本次 Codewise scope 根（见 `_sync.json.scope_root`）
 ```
 
 
@@ -41,16 +47,16 @@ Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KBR>/_sync
 - **`CLAUDE.md`** — [简介]
 
 ### 架构 / 代码地图(如有)
-- [docs/CODEBASE_MAP.md](../CODEBASE_MAP.md) — [简介]
+- **`docs/CODEBASE_MAP.md`** — [简介]
 
 ### 运维 / 部署(如有)
-- [docs/server-setup.md](../server-setup.md) — [简介,标注"操作前必读"等关键提示]
+- **`docs/server-setup.md`** — [简介,标注"操作前必读"等关键提示]
 
 ### 业务文档(如有)
-- [docs/<name>.md](../...) — [简介]
+- **`docs/<name>.md`** — [简介]
 
 ### 实施记录 / 开发日志(如有)
-- [docs/<name>.md](../...) — [简介]
+- **`docs/<name>.md`** — [简介]
 <!-- codewise-docs:end -->
 
 <!-- codewise-interfaces:start -->
@@ -62,14 +68,14 @@ Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KBR>/_sync
 
 [只列项目实际存在的接口类型,不存在的类型不要出现。每个类型的样板见下方:]
 
-### Tauri Commands(N 个,定义在 src-tauri/src/...)
+### Tauri Commands(N 个,定义在 `src-tauri/src/...`)
 
 | 命令 | 职责 | 调用方 |
 |---|---|---|
 | `get_projects` | 获取项目列表 | `useProjects.loadProjects` |
 | ... | ... | ... |
 
-**详情**:[shared/tauri-bridge](shared/tauri-bridge.md) | **完整签名**:src-tauri/src/commands.rs
+**详情**:[shared/tauri-bridge](shared/tauri-bridge.md) | **完整签名**:`src-tauri/src/commands.rs`
 
 ### Tauri Events(N 个)
 
@@ -77,7 +83,7 @@ Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KBR>/_sync
 |---|---|---|
 | `projects-changed` | 文件监控防抖 1s 后 | `useProjects.listen` |
 
-### 云函数(N 个,见 cloudfunctions/ 或 uniCloud-*/cloudfunctions/)
+### 云函数(N 个,见 `cloudfunctions/` 或 `uniCloud-*/cloudfunctions/`)
 
 按类别分组(如有):
 - **autoUpdate***(M 个):`autoUpdateAlbums` | `autoUpdateBundles` | ...
@@ -149,4 +155,26 @@ Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KBR>/_sync
 
 > 同步状态（baseline / synced_at / known_worktrees 等）不在本文件，见 `_sync.json`。
 > 那些字段每次运行都变，放在 INDEX 里会让两台机器的 merge 必然冲突。
+```
+
+## Agent 注册模板
+
+Phase 6 必须同时维护 scope 根的 `AGENTS.md` 与 `CLAUDE.md`，两者标签块内容一致：
+
+1. 文件不存在则创建；已有 `codewise-registry` 标签只替换标签内内容。
+2. 旧 `codewise-claude-registry` 原位迁移；无标签且无知识库段时追加。
+3. 已有用户自定义知识库段时停下询问，标签外一字不动。
+
+```markdown
+<!-- codewise-registry:start -->
+## 📚 知识库
+
+主工作树中的入口：`docs/knowledge/INDEX.md`。它是被主仓库忽略的独立 Git 仓库。
+
+- 每个新任务先读取 INDEX；当前分支有独立目录时读 `.branches/<slug>/INDEX.md`。
+- linked worktree 中该相对路径不存在时，以“包含本文件的 scope 目录”为 ROOT，定位主工作树及相同 scope 下的 `docs/knowledge`；不要在 linked worktree 新建一份。
+- fallback 到父锚点时明确标注“这是父分支视角，不含本分支未合并改动”。
+
+维护：显式调用 `$codewise`（或当前客户端等价形式）执行 update/rebuild/refresh/merge。不要手工维护目录结构、归属或同步元信息；条目正文允许人工补充，Codewise 更新时必须保留。
+<!-- codewise-registry:end -->
 ```
