@@ -172,6 +172,7 @@ Phase 6 必须同时维护 scope 根的 `AGENTS.md` 与 `CLAUDE.md`，两者标�
 主工作树中的入口：`docs/knowledge/INDEX.md`。它是被主仓库忽略的独立 Git 仓库。
 
 - 每个新任务先读取 INDEX；当前分支有独立目录时读 `.branches/<slug>/INDEX.md`。
+- 新 clone 中入口不存在时，先校验 scope 根的 `.codewise-bootstrap.json`，再由 Codewise 按其中登记的 remote/branch 执行安全 bootstrap；不要手工 `git init` 或猜仓库名。
 - linked worktree 中该相对路径不存在时，以“包含本文件的 scope 目录”为 ROOT，定位主工作树及相同 scope 下的 `docs/knowledge`；不要在 linked worktree 新建一份。
 - fallback 到父锚点时明确标注“这是父分支视角，不含本分支未合并改动”。
 

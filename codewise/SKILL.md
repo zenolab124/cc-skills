@@ -65,7 +65,7 @@ python3 <SKILL_DIR>/scripts/validate_control_state.py --kb '<KB>' --source-root 
 
 前者拒绝控制文件、六类目录/条目、分支目录或 scope registry 的软链、特殊文件与越界路径；后者校验 meta/sync/branch registry 的 schema、安全 slug、分支名与完整 commit id，并只输出经 Git 验证的规范 commit；identity 仍由 resolver 校验。fetch/reconcile 后在同一锁内重跑 resolver + 两个 guard，只消费第二轮输出；bootstrap 原子落位后继续持内部锁并同样复验。首次目录要在临时 KB 内先写最小合法 `_meta.json`、空 `_branches.json`、baseline/synced_at 为 null 的 `_sync.json`，通过 guard 后才能生成内容。禁止直接把控制 JSON 字符串拼入路径或 Git 命令。
 
-主工作树首次初始化时按 `storage-layout` 让用户选择已有 remote、明确建新库或取消。非 Git scope 与零 commit 各询问一次并披露能力降级；拒绝 Git 初始化时记录 `degraded_acknowledged`。
+主工作树首次初始化时按 `storage-layout` 处理 bootstrap。若 scope 根存在已提交、未修改且通过 `resolve_bootstrap_hint.py` 校验的 `.codewise-bootstrap.json`，把它视为项目已明确登记的 existing remote 与主线 anchor，不再重复询问；仍须展示物理主工作树分支、`origin/HEAD`、HEAD 与 hint，并在不一致时停止。没有合法 hint 时才让用户选择已有 remote、明确建新库或取消。非 Git scope 与零 commit 各询问一次并披露能力降级；拒绝 Git 初始化时记录 `degraded_acknowledged`。
 
 有 HEAD 的 Git scope 中，首次、rebuild、update、refresh、merge 只要 `source_dirty=true` 就停止，要求先提交或 `git stash` `<ROOT>` 内改动；仅 `git add` 仍是脏状态。不能把未提交文件写进知识后仍用 HEAD 当 baseline。纯 `reidentify` 不读源码，可跳过此项。
 
@@ -103,7 +103,7 @@ python3 <SKILL_DIR>/scripts/resolve_context.py '<ROOT>' --require-clean-source -
 
 ### 0.4 需要确认或停止的边界
 
-以下情况必须停下来：新库 bootstrap/非 Git/零 commit、未登记分支、rebuild、仓库根 monorepo、规划条目数 `<5` 或 `>80`、已有自定义知识库 registry、身份或父索引异常、Git/语义合并冲突。普通 scope 报告、条目规划和常规 update 不等待确认。
+以下情况必须停下来：没有合法 bootstrap hint 的新库 bootstrap、非 Git、零 commit、未登记分支、rebuild、仓库根 monorepo、规划条目数 `<5` 或 `>80`、已有自定义知识库 registry、身份或父索引异常、Git/语义合并冲突。合法 hint 只免除重复选择 remote/anchor，不免除 bootstrap 锁、临时 clone、fsck、tree/control guard 与 identity 校验。普通 scope 报告、条目规划和常规 update 不等待确认。
 
 ## Phase G：首次生成与 rebuild
 

@@ -203,7 +203,13 @@ python3 <SKILL_DIR>/scripts/kb_lock.py recover-cleanup '<KB>' \
 
 ### Bootstrap
 
-主工作树里的 `$KB` 不存在时，不直接 `git init`。先展示物理主工作树当前分支、`refs/remotes/origin/HEAD`（若存在）及 HEAD；detached/无分支时停止。remote default 只作证据，用户必须明确确认哪一条是知识库主线 anchor，不能把物理 main worktree 当前 checkout 自动当主线。然后展示三个选择：
+主工作树里的 `$KB` 不存在时，不直接 `git init`。先展示物理主工作树当前分支、`refs/remotes/origin/HEAD`（若存在）及 HEAD；detached/无分支时停止。然后检查 scope 根的 `.codewise-bootstrap.json`：
+
+```bash
+python3 <SKILL_DIR>/scripts/resolve_bootstrap_hint.py '<ROOT>' --kb '<KB>' --pretty
+```
+
+该文件只有在被源码仓库追踪、与 HEAD 完全一致、无软链、schema/路径/remote/分支均通过校验时才可信。合法 hint 是项目维护者预先登记的 remote 与主线 anchor：展示 hint 与上述 Git 证据；当前分支和 `origin/HEAD`（存在时）都与 `source_branch` 一致即可直接走 existing remote bootstrap，不再向用户重复询问。任一证据不一致时停止，不能自动改 checkout 或猜主线。hint 缺失或无效时不消费其中任何字段，remote default 也只作证据，用户必须明确确认主线 anchor。然后展示三个选择：
 
 1. 提供已有 knowledge remote（新机器/重新 clone）；
 2. 明确初始化一个新知识库；
@@ -232,7 +238,7 @@ python3 <SKILL_DIR>/scripts/kb_lock.py release '<KB>' \
 
 失败时按 token 释放已取得的内部/bootstrap 锁并清理临时目录，最终 `$KB` 保持不存在。新库第一次推送使用普通 `git push -u origin HEAD`，绝不 force。正常退出 finally 释放最终 `$KB` 内部锁。
 
-remote 地址无法从被 ignore 的主仓库自动发现，所以第二台机器必须由用户或本机安全配置提供；不要猜仓库名。
+知识库自身的 remote 地址无法从被 ignore 的主仓库自动发现。跨机器自动 bootstrap 必须由源码仓库 HEAD 中的 `.codewise-bootstrap.json` 显式登记；没有合法 hint 时仍必须由用户或本机安全配置提供，绝不猜仓库名。公开 hint 禁止内嵌凭据，只允许 `https://`、`ssh://` 或 `git@host:path` remote。
 
 ### 运行前 fetch/reconcile
 
