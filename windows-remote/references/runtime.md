@@ -1,6 +1,12 @@
 # 运行环境与故障定位
 
-只在 doctor 失败或需要换机器时读本页。
+只在原生派发失败、doctor 失败或需要换机器时读本页。
+
+## 原生客户端
+
+先查看 `list_threads` 返回的远端 `hostId`。2026-09-10 配对后，Mac 已能列出并读取 Windows 的「修复进程注入组件加载」任务，虽然 `list_projects` 仍只列本机项目。两次 `send_message_to_thread` 返回 `Codex app-server is not available`；首次失败后查询确认没有新轮次，再作一次重试。同期客户端日志有 `remote control app-server stream sequence gap detected` 和随后 `connected`，尚未判定唯一根因。**读取历史成功不代表派发成功，也不代表 Computer Use 已验收。** 遇到同类情况先核对目标最新轮次，避免重复派发；再区分用户从客户端直接发消息是否可用与 Agent 派发接口是否可用，不自动退回 CLI 冒充客户端验收。
+
+## CLI 备用环境
 
 当前已验证的目标是 SSH alias `PC`，Windows 用户资料目录为 `C:\Users\qazws`。项目路径只是调用参数，不是桥接依赖。
 
