@@ -12,7 +12,7 @@ cc-skills/
 └── CLAUDE.md
 ```
 
-当前 skills：adb-visual-automation、blog、codewise、cross-talk、daily-summary、draw、fix-thinking、prd、recall、wechat-notify。
+当前 skills：adb-visual-automation、blog、codewise、cross-talk、daily-summary、draw、fix-thinking、prd、recall、wechat-notify、windows-remote。
 
 特殊：fix-thinking 除手动触发外，还以 SessionStart hook 形式注册在 `~/.claude/settings.json`（指向 `~/.claude/skills/fix-thinking/check-thinking-patch.sh`），自动检测 VS Code 扩展更新清掉的思考块 patch。
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mac 与 Windows Agent 协作"
+  short_description: "从 Mac 派发 Windows Agent 任务、持续追问并收回现场证据"
+  default_prompt: "用 $windows-remote 让 Windows Agent 调查当前项目的问题，并把实际结果与证据带回 Mac。"
