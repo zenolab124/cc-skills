@@ -1,7 +1,7 @@
 interface:
   display_name: "Codewise 项目知识库"
-  short_description: "跨代码、全部 Worktree 与多 Agent 会话维护项目知识库"
-  default_prompt: "使用 $codewise 扫描代码、全部 Git Worktree 与多 Agent 会话，更新当前项目知识库。"
+  short_description: "按本次改动维护项目决策、接口契约与故障经验，保留完整历史扫描入口"
+  default_prompt: "使用 $codewise 按本次任务或明确变更范围更新相关权威文档，只沉淀有价值的新知识。"
 
 policy:
   allow_implicit_invocation: false

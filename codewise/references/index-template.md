@@ -62,7 +62,7 @@ Phase 4 生成 `<KBR>/INDEX.md` 的完整模板。**同步状态写 `<KBR>/_sync
 <!-- codewise-interfaces:start -->
 ## 接口契约速查
 
-本项目所有"对外调用入口"快速索引,**让 AI 一进项目就掌握接口全局地图**(尤其云函数项目接口零散难找)。
+本项目所有"对外调用入口"快速索引,**仅在相关任务需要时查阅接口地图**(尤其云函数项目接口零散难找)。
 
 **完整签名以代码为准**——本表只列"名 + 职责 + 入口位置",可能滞后一两次 update。
 
@@ -167,15 +167,13 @@ Phase 6 必须同时维护 scope 根的 `AGENTS.md` 与 `CLAUDE.md`，两者标�
 
 ```markdown
 <!-- codewise-registry:start -->
-## 📚 知识库
+## 📚 按需项目知识
 
-主工作树中的入口：`docs/knowledge/INDEX.md`。它是被主仓库忽略的独立 Git 仓库。
+若存在 `docs/PROJECT_GUIDE.md`，任务需要导航时查此入口；按本次功能读取相关权威文档和源码，不要求每次通读全库。
 
-- 每个新任务先读取 INDEX；当前分支有独立目录时读 `.branches/<slug>/INDEX.md`。
-- 新 clone 中入口不存在时，先校验 scope 根的 `.codewise-bootstrap.json`，再由 Codewise 按其中登记的 remote/branch 执行安全 bootstrap；不要手工 `git init` 或猜仓库名。
-- linked worktree 中该相对路径不存在时，以“包含本文件的 scope 目录”为 ROOT，定位主工作树及相同 scope 下的 `docs/knowledge`；不要在 linked worktree 新建一份。
-- fallback 到父锚点时明确标注“这是父分支视角，不含本分支未合并改动”。
-
-维护：显式调用 `$codewise`（或当前客户端等价形式）执行 update/rebuild/refresh/merge。不要手工维护目录结构、归属或同步元信息；条目正文允许人工补充，Codewise 更新时必须保留。
+- `docs/knowledge/` 是被主仓库忽略的独立历史参考库；按关键词检索，读取前核对分支与时效，不默认注入或通读 `INDEX.md`。
+- linked worktree 缺旧库时定位主工作树相同 scope；使用时明确“父分支视角，不含本分支未合并改动”。普通开发不自动 bootstrap、同步或修复旧库。
+- `$codewise` / `update` 默认维护本次任务或明确变更范围内的权威文档，不修改旧库及其 baseline/synced_at；没有新知识可零改动。
+- `full-update` / `rebuild` / `refresh-docs` / `refresh-interfaces` / `merge` / `reidentify` 仅在明确请求时执行旧库维护；保留身份、路径、锁与冲突检查。缺库时才按经校验的 `.codewise-bootstrap.json` 处理，不猜 remote。
 <!-- codewise-registry:end -->
 ```
