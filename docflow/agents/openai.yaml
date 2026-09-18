@@ -1,0 +1,4 @@
+interface:
+  display_name: "文档协作 · DocFlow"
+  short_description: "整理简短中文功能文档，核对相关代码入口与时效性，保留必要经验和证据"
+  default_prompt: "使用 $docflow 整理本次指定功能的文档，优先维护已有说明，核对源码入口并标明未验证范围。"

@@ -1,6 +1,6 @@
 # cc-skills
 
-统一管理自建 Claude Code skills 的仓库。每个子目录即一个 skill，通过软链接同步到 `~/.claude/skills/`。
+统一管理自建 Agent skills 及其配套规则的仓库。每个子目录即一套能力；Skill 按需安装到 Claude/Codex 的技能目录，配套规则通过各自安装工具管理。
 
 ## 仓库结构
 
@@ -12,7 +12,9 @@ cc-skills/
 └── CLAUDE.md
 ```
 
-当前 skills：adb-visual-automation、blog、codewise、cross-talk、daily-summary、draw、fix-thinking、prd、recall、wechat-notify、windows-remote。
+当前 skills：adb-visual-automation、blog、cross-talk、docflow、daily-summary、draw、fix-thinking、prd、recall、wechat-notify、windows-remote。
+
+已退役：`codewise/` 保留为源码档案（2026-09-19）。本机已解除技能安装链接及 Claude/Codex SessionStart 注册；常规安装/同步不要重新链接或注册它。各项目使用源码与相关权威文档，原独立知识库保留为只读历史档案。其他机器的入口需在对应机器单独核验，不能从本机退役推断已同步。
 
 特殊：fix-thinking 除手动触发外，还以 SessionStart hook 形式注册在 `~/.claude/settings.json`（指向 `~/.claude/skills/fix-thinking/check-thinking-patch.sh`），自动检测 VS Code 扩展更新清掉的思考块 patch。
 
@@ -22,7 +24,15 @@ cc-skills/
 
 **单一真实源**：本仓库是唯一源，`~/.claude/skills/<name>` 是指向本仓库的符号链接。
 
-在本仓库编辑 = Claude Code 立即生效，无需额外同步步骤。
+Skill 链接指向本仓库；修改后由客户端重新发现/加载，当前会话已加载内容不保证即时刷新。配套 Rules 的安装副本须使用该能力的安装工具更新并检查，不能从 Git 拉取成功推断已生效。
+
+### 文档协作 · DocFlow
+
+- 唯一维护目录：`docflow/`；行为规则 `RULES.md`、整理流程 `SKILL.md`、中文模板和检查工具一起版本管理。
+- 本机 Claude/Codex 接入：`python3 docflow/scripts/install.py install --clients both`；`diff` 预览、`check` 核对、`uninstall` 解除。
+- 全局配置只管理 DocFlow 标记区块，正文来源唯一；禁止手动维护安装副本。Skill 以链接安装，不覆盖异源安装。
+- 各项目保留自己的功能文档及必要导航；本仓库不收集业务知识、私人会话或生产状态。
+- 使用方式和安装边界见 [DocFlow](docflow/SKILL.md)。源码拉取、安装一致、新会话加载、另一台机器验收分别确认。
 
 ### 新增 skill
 
