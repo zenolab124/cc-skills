@@ -1,0 +1,4 @@
+interface:
+  display_name: "跨会话回忆 · Recall"
+  short_description: "检索 Claude Code 与 Codex 的历史会话，找回此前的讨论、决定和执行过程"
+  default_prompt: "用 $recall 在当前项目的 Claude Code 与 Codex 历史会话中查找此前关于这个问题的讨论和结论。"
