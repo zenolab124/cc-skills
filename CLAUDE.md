@@ -12,11 +12,9 @@ cc-skills/
 └── CLAUDE.md
 ```
 
-当前 skills：adb-visual-automation、blog、cross-talk、docflow、daily-summary、draw、fix-thinking、prd、recall、wechat-notify、windows-remote。
+当前 skills：adb-visual-automation、blog、cross-talk、docflow、daily-summary、draw、prd、recall、wechat-notify、windows-remote。
 
 已退役：`codewise/` 保留为源码档案（2026-09-19）。本机已解除技能安装链接及 Claude/Codex SessionStart 注册；常规安装/同步不要重新链接或注册它。各项目使用源码与相关权威文档，原独立知识库保留为只读历史档案。其他机器的入口需在对应机器单独核验，不能从本机退役推断已同步。
-
-特殊：fix-thinking 除手动触发外，还以 SessionStart hook 形式注册在 `~/.claude/settings.json`（指向 `~/.claude/skills/fix-thinking/check-thinking-patch.sh`），自动检测 VS Code 扩展更新清掉的思考块 patch。
 
 本仓库只管理自建 skill。第三方 skill（如 cartographer、ui-styling 等）直接放在 `~/.claude/skills/` 下，不纳入版本控制。
 
